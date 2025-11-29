@@ -11,6 +11,13 @@
 #define N2 81
 #define SQRTN 3
 
+
+#define BLOCKS 256
+#define THREADS 32
+
+
+#define BOARDS 8192 //32 * 256
+
 //// do testow
 //#include <iostream>
 //#include <chrono>
@@ -23,18 +30,22 @@ __device__ void DFS(uint64_t rows1, uint64_t rows2,
     uint64_t boxes1, uint64_t boxes2,
     char* empty, char* stack);
 
+__device__ void BFS(char* a, char* b, size_t* counter_a, size_t* counter_b);
+
 __global__ void sudokuKernel(char* a, char* b, char* sol, size_t* counter_a, size_t* counter_b)
 {
-    int i = threadIdx.x; 
-    // TODO do zmiany
-    for(int i = 0; i < N2; i++)
-    {
-		//a[i] = a[i] - '1';
-	}
-   
+    int index = blockIdx.x * BLOCKS + threadIdx.x;
+
 
     parse_and_run_dfs(a, sol, 0);
 }
+
+__device__ void BFS(char* a, char* b, size_t* counter_a, size_t* counter_b)
+{
+
+}
+
+
 
 
 /// <summary>
@@ -90,8 +101,6 @@ __device__ void parse_and_run_dfs(char* board, char* sol, size_t* counter_sol) {
         }
 
 
-
-
         col += 1;
         if (col == N) {
             col = 0;
@@ -131,7 +140,7 @@ __device__ void parse_and_run_dfs(char* board, char* sol, size_t* counter_sol) {
 
     int i = 0;
     char num = empty[i];
-    while(num != GUARD) {
+    while (num != GUARD) {
         sol[num] = stack[i];
         i++;
         num = empty[i];
@@ -250,16 +259,16 @@ cudaError_t SudokuCuda(const char* board, size_t size_buffer, char* solutions, s
         goto Error;
     }
 
-   
 
-	char* dev_a = 0;
-	char* dev_b = 0;
-	char* dev_solutions = 0;
-	size_t* counter_a = 0;
+
+    char* dev_a = 0;
+    char* dev_b = 0;
+    char* dev_solutions = 0;
+    size_t* counter_a = 0;
     size_t* counter_b = 0;
-	const int size_board = 81 * sizeof(char);
+    const int size_board = 81 * sizeof(char);
 
-    cudaStatus = cudaMalloc((void**)&dev_a, size_buffer );
+    cudaStatus = cudaMalloc((void**)&dev_a, size_buffer);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMalloc failed!");
         goto Error;
@@ -301,7 +310,7 @@ cudaError_t SudokuCuda(const char* board, size_t size_buffer, char* solutions, s
     sudokuKernel << <1, 1 >> > (dev_a, dev_b, dev_solutions, counter_a, counter_b);
 
 
-	//printf("size_t: %d\nsolutions: %d\nboard: %d\nsize: %d\n", sizeof(size_t), sizeof(solutions), sizeof(board), size_buffer);
+    //printf("size_t: %d\nsolutions: %d\nboard: %d\nsize: %d\n", sizeof(size_t), sizeof(solutions), sizeof(board), size_buffer);
 
  //   // test 
  //  sudokuKernel << <1, 1 >> > (dev_a, dev_b, dev_solutions, counter_a, counter_b);
@@ -315,7 +324,7 @@ cudaError_t SudokuCuda(const char* board, size_t size_buffer, char* solutions, s
  //   auto t1 = std::chrono::high_resolution_clock::now();
  //   auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
  //   printf("Kernel time (host wall): %.3f milisekund\n", us / 1000.0);
-	//// koniec testu
+    //// koniec testu
 
 
 
@@ -326,7 +335,7 @@ cudaError_t SudokuCuda(const char* board, size_t size_buffer, char* solutions, s
         fprintf(stderr, "sudokuKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
         goto Error;
     }
-    
+
     // cudaDeviceSynchronize waits for the kernel to finish, and returns
     // any errors encountered during the launch.
     cudaStatus = cudaDeviceSynchronize();
@@ -346,21 +355,83 @@ Error:
     cudaFree(dev_a);
     cudaFree(dev_b);
     cudaFree(dev_solutions);
-    
+
     return cudaStatus;
 }
 
+struct SudokuInstance {
+    char board[81 * BOARDS];
 
+    char empty[81 * BOARDS];
+
+    uint64_t rows1[BOARDS];
+    uint64_t rows2[BOARDS];
+
+    uint64_t cols1[BOARDS];
+    uint64_t cols2[BOARDS];
+
+    uint64_t boxes1[BOARDS];
+    uint64_t boxes2[BOARDS];
+};
+
+
+SudokuInstance create_tables(char b[]) {
+    SudokuInstance si{};
+    char empty_ptr = 0;
+
+    for (int i = 0; i < 81; ++i)
+    {
+        const char ch = b[i];
+        si.board[i] = ch;
+
+        if (ch == '0')
+        {
+            si.empty[empty_ptr++] = static_cast<char>(i);
+            continue;
+        }
+
+        const int num = ch - '1';
+        const uint64_t bit_mask = (uint64_t)1ull << num;
+
+        const int row = i / 9;
+        const int col = i % 9;
+        const int box = (row / 3) * 3 + (col / 3);
+
+        if (row < 7)
+            si.rows1[0] |= bit_mask << (row * 9);
+        else
+            si.rows2[0] |= bit_mask << ((row - 7) * 9);
+
+        if (col < 7)
+            si.cols1[0] |= bit_mask << (col * 9);
+        else
+            si.cols2[0] |= bit_mask << ((col - 7) * 9);
+
+        if (box < 7)
+            si.boxes1[0] |= bit_mask << (box * 9);
+        else
+            si.boxes2[0] |= bit_mask << ((box - 7) * 9);
+    }
+
+    si.empty[empty_ptr] = GUARD;
+
+    return si;
+}
 
 
 int main()
 {
     const char board[] = "530070000600195000098000060800060003400803001700020006060000280000419005000080079";
-    // przy parsowaniu danych mozna obliczyc max ilosc wolnych pol wiec tez glebokosc DFS
-	const size_t size = 1024 * 1024 * 1024; // 1 GB
-	char* soulutions = new char[size / 1024];
 
-    cudaError_t cudaStatus = SudokuCuda(board, size, soulutions, size/1024);
+
+
+
+
+    // przy parsowaniu danych mozna obliczyc max ilosc wolnych pol wiec tez glebokosc DFS
+    const size_t size = 1024 * 1024 * 1024; // 1 GB
+    char* soulutions = new char[size / 1024];
+
+    cudaError_t cudaStatus = SudokuCuda(board, size, soulutions, size / 1024);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "SudokuCuda failed!");
         return 1;
