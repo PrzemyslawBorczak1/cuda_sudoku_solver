@@ -2,7 +2,11 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-#include <stdio.h>
+
+
+#include "stdio.h";
+
+
 
 #define GUARD 82
 #define NO_SOL 83
@@ -16,12 +20,11 @@
 #define THREADS 32
 
 
-#define BOARDS 8192 //32 * 256
 
 //// do testow
 //#include <iostream>
 //#include <chrono>
-//using namespace std;
+using namespace std;
 
 
 __device__ void parse_and_run_dfs(char* board, char* sol, size_t* counter_sol);
@@ -307,7 +310,7 @@ cudaError_t SudokuCuda(const char* board, size_t size_buffer, char* solutions, s
     }
 
 
-    sudokuKernel << <1, 1 >> > (dev_a, dev_b, dev_solutions, counter_a, counter_b);
+    sudokuKernel << <10, 10 >>> (dev_a, dev_b, dev_solutions, counter_a, counter_b);
 
 
     //printf("size_t: %d\nsolutions: %d\nboard: %d\nsize: %d\n", sizeof(size_t), sizeof(solutions), sizeof(board), size_buffer);
@@ -359,30 +362,116 @@ Error:
     return cudaStatus;
 }
 
+
+#include <string>
+#include <cstdio> 
+
+#define LINE_LEN 83
+
+#define ERR(source) \
+    (fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), perror(source), exit(EXIT_FAILURE))
+
+
+#define BOARDS 3000 //32 * 256
+
 struct SudokuInstance {
-    char board[81 * BOARDS];
+    char* empty;
 
-    char empty[81 * BOARDS];
+    uint64_t* rows1;
+    uint64_t* rows2;
 
-    uint64_t rows1[BOARDS];
-    uint64_t rows2[BOARDS];
+    uint64_t* cols1;
+    uint64_t* cols2;
 
-    uint64_t cols1[BOARDS];
-    uint64_t cols2[BOARDS];
+    uint64_t* boxes1;
+    uint64_t* boxes2;
 
-    uint64_t boxes1[BOARDS];
-    uint64_t boxes2[BOARDS];
+	uint64_t* number; // moze byc zmiejszone na 32 jesli rozwazane co najwyzej 8k watkow
 };
 
 
-SudokuInstance create_tables(char b[]) {
-    SudokuInstance si{};
-    char empty_ptr = 0;
+SudokuInstance create_instance() {
+
+    SudokuInstance instance{};
+    instance.empty = (char*)malloc(BOARDS * N2);
+
+    instance.rows1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+    instance.rows2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+
+    instance.cols1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+    instance.cols2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+
+    instance.boxes1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+    instance.boxes2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+}
+
+void wrtie_board_to_instance(SudokuInstance si, int offset, char* board) {
+    
+
+
+	int empty_ptr = 0;
 
     for (int i = 0; i < 81; ++i)
     {
-        const char ch = b[i];
-        si.board[i] = ch;
+        char ch = board[i];
+        if (ch == '0')
+        {
+            si.empty[empty_ptr + offset * N2] = (char)i;
+            empty_ptr++;
+            continue;
+        }
+
+        const int num = ch - '1';
+        const uint64_t bit_mask = (uint64_t)1 << num;
+
+        const int row = i / 9;
+        const int col = i % 9;
+        const int box = (row / 3) * 3 + (col / 3);
+
+        if (row < 7)
+            si.rows1[offset] |= bit_mask << (row * 9);
+        else
+            si.rows2[offset] |= bit_mask << ((row - 7) * 9);
+
+        if (col < 7)
+            si.cols1[offset] |= bit_mask << (col * 9);
+        else
+            si.cols2[offset] |= bit_mask << ((col - 7) * 9);
+
+        if (box < 7)
+            si.boxes1[offset] |= bit_mask << (box * 9);
+        else
+            si.boxes2[offset] |= bit_mask << ((box - 7) * 9);
+    }
+
+    si.empty[empty_ptr] = GUARD;
+
+    return;
+}
+
+SudokuInstance populate_boards(char* boards, int count) {
+
+	SudokuInstance instance = create_instance();
+
+    for (int i = 0; i < count; i++) {
+        wrtie_board_to_instance(instance, i, boards + i);
+    }
+}
+
+
+
+
+
+
+
+void create_tables(char board[]) {
+    char empty_ptr = 0;
+    SudokuInstance si{};
+
+    for (int i = 0; i < 81; ++i)
+    {
+        const char ch = board[i];
+        board[i] = ch;
 
         if (ch == '0')
         {
@@ -415,21 +504,119 @@ SudokuInstance create_tables(char b[]) {
 
     si.empty[empty_ptr] = GUARD;
 
-    return si;
+    return;
 }
 
 
-int main()
+
+
+void usage() {
+    printf("Usage:\n");
+    printf("  sudoku method count input_file output_file\n");
+    printf("Where:\n");
+    printf("  method       : cpu | gpu\n");
+    printf("  count        : positive integer (<= number of lines in input_file)\n");
+    printf("  input_file   : path to input text file with 81-digit boards per line (0 for empty)\n");
+    printf("  output_file  : path to output text file (will be created/overwritten)\n");
+}
+
+
+char* read_to_buff(int count, char* path) {
+
+
+    FILE* source = fopen(path, "rb");
+    if (source == NULL) {
+        fprintf(stderr, "Could not open input file: '%s'\n", path);
+        usage();
+        exit(EXIT_FAILURE);
+    }
+
+    size_t expected = (size_t)count * LINE_LEN * sizeof(char);
+
+    char* buff = (char*)malloc(expected);
+    if (!buff) {
+        fprintf(stderr, "malloc bulk buffer");
+
+        exit(EXIT_FAILURE);
+    }
+
+    size_t got = fread(buff, 1, expected, source);
+    if (got != expected) {
+        if (feof(source))
+            fprintf(stderr, "Too short file got %d lines but needs %d lines\n", got / LINE_LEN, expected / LINE_LEN);
+        usage();
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(source);
+
+    return buff;
+}
+
+int main(int argc, char* argv[])
 {
+    argc = 5;
+
+    argv[1] = "gpu";
+    argv[2] = "7";
+    argv[3] = "C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_less.csv";
+
+   if (argc != 5) {
+        fprintf(stderr, "Invalid arguments. Expected exactly 4 parameters.\n");
+        usage();
+        return 1;
+    }
+    
+
+    const char* method = argv[1];
+    const char* countStr = argv[2];
+    const char* outputPath = argv[4];
+
+    if (strcmp(method, "cpu") != 0 && strcmp(method, "gpu") != 0) {
+        fprintf(stderr, "Invalid method: '%s'. Allowed: 'cpu' or 'gpu'.\n", method);
+        usage();
+		exit(EXIT_FAILURE);
+    }
+
+    int count = stoi(countStr);
+    if (count < 0) {
+        fprintf(stderr, "Invalid count: '%d'. Must be a positive integer.\n", count);
+        usage();
+        exit(EXIT_FAILURE);
+    }
+
+
+    char* buff = read_to_buff(count, argv[3]);
+	auto sudoku_instances = populate_boards(buff, count);
+
+
+    int index = 0;
+    for (int j = 0; j < count; j++) {
+
+        for (int i = 0; i < 81; i++) {
+            printf("%c", buff[index++]);
+        }
+
+        printf(" '%i' ", buff[index++]);
+
+        printf(" '%i' ", buff[index++]);
+
+
+		printf("\n");
+    }
+
+
+    return 1;
+
+
+
     const char board[] = "530070000600195000098000060800060003400803001700020006060000280000419005000080079";
 
-
-
+    int size = 1024;
 
 
     // przy parsowaniu danych mozna obliczyc max ilosc wolnych pol wiec tez glebokosc DFS
-    const size_t size = 1024 * 1024 * 1024; // 1 GB
-    char* soulutions = new char[size / 1024];
+    char* soulutions = new char[1024];
 
     cudaError_t cudaStatus = SudokuCuda(board, size, soulutions, size / 1024);
     if (cudaStatus != cudaSuccess) {
