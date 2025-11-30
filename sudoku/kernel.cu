@@ -1,7 +1,5 @@
-﻿
-#include "cuda_runtime.h"
+﻿#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-
 
 
 #include "stdio.h";
@@ -28,27 +26,23 @@ using namespace std;
 struct SudokuInstance {
     char* empty;
 
-    uint64_t* rows1;
-    uint64_t* rows2;
-
-    uint64_t* cols1;
-    uint64_t* cols2;
-
-    uint64_t* boxes1;
-    uint64_t* boxes2;
+    // 9 uint16_t masks per board for rows, cols and boxes
+    uint16_t* rows;   // size: count * 9
+    uint16_t* cols;   // size: count * 9
+    uint16_t* boxes;  // size: count * 9
 
     uint32_t* number; // moze byc zmiejszone na 16 jesli rozwazane co najwyzej 8k watkow
+
+    char* boards;
 
     uint32_t count;
 };
 
 
-__device__ void DFS(uint64_t rows1, uint64_t rows2,
-    uint64_t cols1, uint64_t cols2,
-    uint64_t boxes1, uint64_t boxes2,
+__device__ void DFS(uint16_t* rows,
+    uint16_t* cols,
+    uint16_t* boxes,
     char* empty, char* stack);
-
-__device__ void BFS(char* a, char* b, size_t* counter_a, size_t* counter_b);
 
 __global__ void sudokuKernel(SudokuInstance si, char* board)
 {
@@ -64,56 +58,61 @@ __global__ void sudokuKernel(SudokuInstance si, char* board)
     char* stackSh = threadBase + N2;
 
 
-     char* emptyGlobal = si.empty + gid * N2;
+    char* emptyGlobal = si.empty + gid * N2;
     for (int i = 0; i < N2; ++i) {
         emptySh[i] = emptyGlobal[i];
-		//printf("emptySh[%d] = %d\n", i, (int)emptySh[i]);
         if (emptyGlobal[i] == GUARD) break;
     }
 
-	emptySh = emptyGlobal;
+    emptySh = emptyGlobal;
 
+    // Load 16-bit occupancy masks for this board into local arrays
+    uint16_t rowsLoc[9];
+    uint16_t colsLoc[9];
+    uint16_t boxesLoc[9];
+    const int base = gid * 9;
+    for (int i = 0; i < 9; ++i) {
+        rowsLoc[i] = si.rows[base + i];
+        colsLoc[i] = si.cols[base + i];
+        boxesLoc[i] = si.boxes[base + i];
+    }
 
     DFS(
-        si.rows1[gid], si.rows2[gid],
-        si.cols1[gid], si.cols2[gid],
-        si.boxes1[gid], si.boxes2[gid],
+        rowsLoc, colsLoc, boxesLoc,
         emptySh, stackSh
     );
 
-
-    if (stackSh[0] == NO_SOL)
+   /* if (stackSh[0] == NO_SOL)
         printf("%d No solution\n", gid);
     else {
         printf("%d Solution\n", gid);
         printf("%d empty: [%d,%d,%d]\n stack : [% d, % d, % d]\n", gid, emptySh[0], emptySh[1], emptySh[2], stackSh[0], stackSh[1], stackSh[2]);
-    }
+    }*/
 
     return;
 }
 
-__device__ void sol_and_fill(uint64_t rows1, uint64_t rows2,
-    uint64_t cols1, uint64_t cols2,
-    uint64_t boxes1, uint64_t boxes2,
+__device__ void sol_and_fill(uint16_t* rows,
+    uint16_t* cols,
+    uint16_t* boxes,
     char* empty, char* stack, char* board) {
 
-    DFS(rows1, rows2,
-        cols1, cols2,
-        boxes1, boxes2,
+    DFS(rows,
+        cols,
+        boxes,
         empty, stack);
 
-	if (stack[0] == NO_SOL)
-		printf("No solution\n");
+   /* if (stack[0] == NO_SOL)
+        printf("No solution\n");
     else {
-		printf("Solution: ");
-    }
-        
+        printf("Solution: ");
+    }*/
 
 }
 
-__device__ void DFS(uint64_t rows1, uint64_t rows2,
-    uint64_t cols1, uint64_t cols2,
-    uint64_t boxes1, uint64_t boxes2,
+__device__ void DFS(uint16_t* rows,
+    uint16_t* cols,
+    uint16_t* boxes,
     char* empty, char* stack)
 {
     char depth = 0;
@@ -132,34 +131,7 @@ __device__ void DFS(uint64_t rows1, uint64_t rows2,
         // setup in wchich row, col, box we are
         char row = ind / 9;
         char col = ind % 9;
-        char box = (row / 3) * 3 + (col / 3);
-
-        uint64_t* row_w, * col_w, * box_w;
-
-        // determine which variable has appropriate bits
-        if (row < 7) {
-            row_w = &rows1;
-        }
-        else {
-            row -= 7;
-            row_w = &rows2;
-        }
-
-        if (col < 7) {
-            col_w = &cols1;
-        }
-        else {
-            col -= 7;
-            col_w = &cols2;
-        }
-
-        if (box < 7) {
-            box_w = &boxes1;
-        }
-        else {
-            box -= 7;
-            box_w = &boxes2;
-        }
+        char box = (char)((row / 3) * 3 + (col / 3));
 
         // deleteing mask of number that is being backtracked
         if (!found) {
@@ -169,32 +141,29 @@ __device__ void DFS(uint64_t rows1, uint64_t rows2,
                 return;
             }
 
-            uint64_t mask = (uint64_t)1 << (stack[depth]);
+            uint16_t mask = (uint16_t)1u << (stack[depth]);
 
-            *row_w &= ~(mask << (row * 9));
-            *col_w &= ~(mask << (col * 9));
-            *box_w &= ~(mask << (box * 9));
-
+            rows[row] &= (uint16_t)~mask;
+            cols[col] &= (uint16_t)~mask;
+            boxes[box] &= (uint16_t)~mask;
         }
 
-
         found = false;
-        for (char num = stack[depth] + 1; num < 9; num++) {
+        for (char num = (char)(stack[depth] + 1); num < 9; num++) {
 
-            uint64_t mask = (uint64_t)1 << (num);
+            uint16_t mask = (uint16_t)1u << (num);
 
-            if ((*row_w >> (row * 9) & mask) ||
-                (*col_w >> (col * 9) & mask) ||
-                (*box_w >> (box * 9) & mask))
+            if ((rows[row] & mask) ||
+                (cols[col] & mask) ||
+                (boxes[box] & mask))
                 continue;
 
             found = true;
             stack[depth] = num;
 
-            (*row_w) |= mask << (row * 9);
-            (*col_w) |= mask << (col * 9);
-            (*box_w) |= mask << (box * 9);
-
+            rows[row] |= mask;
+            cols[col] |= mask;
+            boxes[box] |= mask;
 
             depth++;
             stack[depth] = -1;
@@ -206,7 +175,6 @@ __device__ void DFS(uint64_t rows1, uint64_t rows2,
 
     }
 }
-
 
 
 
@@ -225,39 +193,32 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
     }
 
 
-	SudokuInstance d_si = {};
+    SudokuInstance d_si = {};
 
     size_t boardsCount = si.count;
-    size_t maskCount64 = boardsCount * sizeof(uint64_t);
+    size_t maskCount16x9 = boardsCount * 9 * sizeof(uint16_t);
     size_t emptyCountChar = boardsCount * N2 * sizeof(char);
     size_t numberCount32 = boardsCount * sizeof(uint32_t);
-    size_t boardsChars = boardsCount * N2 * sizeof(char); 
+    size_t boardsChars = boardsCount * N2 * sizeof(char);
 
 
-
-    if ((cudaStatus = cudaMalloc((void**)&d_si.rows1, maskCount64)) != cudaSuccess) goto AllocError;
-    if ((cudaStatus = cudaMalloc((void**)&d_si.rows2, maskCount64)) != cudaSuccess) goto AllocError;
-    if ((cudaStatus = cudaMalloc((void**)&d_si.cols1, maskCount64)) != cudaSuccess) goto AllocError;
-    if ((cudaStatus = cudaMalloc((void**)&d_si.cols2, maskCount64)) != cudaSuccess) goto AllocError;
-    if ((cudaStatus = cudaMalloc((void**)&d_si.boxes1, maskCount64)) != cudaSuccess) goto AllocError;
-    if ((cudaStatus = cudaMalloc((void**)&d_si.boxes2, maskCount64)) != cudaSuccess) goto AllocError;
+    if ((cudaStatus = cudaMalloc((void**)&d_si.rows, maskCount16x9)) != cudaSuccess) goto AllocError;
+    if ((cudaStatus = cudaMalloc((void**)&d_si.cols, maskCount16x9)) != cudaSuccess) goto AllocError;
+    if ((cudaStatus = cudaMalloc((void**)&d_si.boxes, maskCount16x9)) != cudaSuccess) goto AllocError;
     if ((cudaStatus = cudaMalloc((void**)&d_si.empty, emptyCountChar)) != cudaSuccess) goto AllocError;
     if ((cudaStatus = cudaMalloc((void**)&d_si.number, numberCount32)) != cudaSuccess) goto AllocError;
     char* d_boards = nullptr;
     if ((cudaStatus = cudaMalloc((void**)&d_boards, boardsCount * N2)) != cudaSuccess) goto AllocError;
 
-    if ((cudaStatus = cudaMemcpy(d_si.rows1, si.rows1, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
-    if ((cudaStatus = cudaMemcpy(d_si.rows2, si.rows2, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
-    if ((cudaStatus = cudaMemcpy(d_si.cols1, si.cols1, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
-    if ((cudaStatus = cudaMemcpy(d_si.cols2, si.cols2, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
-    if ((cudaStatus = cudaMemcpy(d_si.boxes1, si.boxes1, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
-    if ((cudaStatus = cudaMemcpy(d_si.boxes2, si.boxes2, maskCount64, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
+    if ((cudaStatus = cudaMemcpy(d_si.rows, si.rows, maskCount16x9, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
+    if ((cudaStatus = cudaMemcpy(d_si.cols, si.cols, maskCount16x9, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
+    if ((cudaStatus = cudaMemcpy(d_si.boxes, si.boxes, maskCount16x9, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
     if ((cudaStatus = cudaMemcpy(d_si.empty, si.empty, emptyCountChar, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
     if ((cudaStatus = cudaMemcpy(d_si.number, si.number, numberCount32, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
 
     d_si.count = si.count;
 
-    int block =  d_si.count / THREADSPERBLOCK + 1;
+    int block = d_si.count / THREADSPERBLOCK + 1;
 
 
     auto t0 = chrono::high_resolution_clock::now();
@@ -268,25 +229,6 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
     auto t1 = chrono::high_resolution_clock::now();
     auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
     printf("alloc %.3f ms\n", us / 1000.0);
-
-
-    //printf("size_t: %d\nsolutions: %d\nboard: %d\nsize: %d\n", sizeof(size_t), sizeof(solutions), sizeof(board), size_buffer);
-
- //   // test 
- //  sudokuKernel << <1, 1 >> > (dev_a, dev_b, dev_solutions, counter_a, counter_b);
- //   cudaDeviceSynchronize();
-
-
- //   // If you want host wall-clock including launch + sync:
- //   auto t0 = std::chrono::high_resolution_clock::now();
- //   sudokuKernel << <1, 1 >> > (dev_a, dev_b, dev_solutions, counter_a, counter_b);
- //   cudaDeviceSynchronize();
- //   auto t1 = std::chrono::high_resolution_clock::now();
- //   auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
- //   printf("Kernel time (host wall): %.3f milisekund\n", us / 1000.0);
-    //// koniec testu
-
-
 
 
     // Check for any errors launching the kernel
@@ -304,23 +246,13 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
         goto Error;
     }
 
-    // Copy output vector from GPU buffer to host memory.
-   /* cudaStatus = cudaMemcpy(solutions, dev_solutions, size_sol, cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }*/
-
 CopyError:
 AllocError:
 Error:
     // Cleanup
-    cudaFree(d_si.rows1);
-    cudaFree(d_si.rows2);
-    cudaFree(d_si.cols1);
-    cudaFree(d_si.cols2);
-    cudaFree(d_si.boxes1);
-    cudaFree(d_si.boxes2);
+    cudaFree(d_si.rows);
+    cudaFree(d_si.cols);
+    cudaFree(d_si.boxes);
     cudaFree(d_si.empty);
     cudaFree(d_si.number);
     cudaFree(d_boards);
@@ -339,7 +271,7 @@ Error:
     (fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), perror(source), exit(EXIT_FAILURE))
 
 
-#define BOARDS 80000 //80 tys
+#define BOARDS 9000 //9 tys
 
 
 
@@ -349,89 +281,81 @@ SudokuInstance create_instance() {
     SudokuInstance instance{};
     instance.empty = (char*)malloc(BOARDS * N2);
 
-    instance.rows1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
-    instance.rows2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
-
-    instance.cols1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
-    instance.cols2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
-
-    instance.boxes1 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
-    instance.boxes2 = (uint64_t*)malloc(BOARDS * sizeof(uint64_t));
+    instance.rows = (uint16_t*)malloc(BOARDS * N * sizeof(uint16_t));
+    instance.cols = (uint16_t*)malloc(BOARDS * N * sizeof(uint16_t));
+    instance.boxes = (uint16_t*)malloc(BOARDS * N * sizeof(uint16_t));
 
     instance.number = (uint32_t*)malloc(BOARDS * sizeof(uint32_t));
+
+    instance.boards = (char*)malloc(BOARDS * N2);
 
     return instance;
 }
 
-void clear_sudoku_instance(SudokuInstance* si) {
-	free(si->empty);
-	free(si->rows1);
-	free(si->rows2);
-	free(si->cols1);
-	free(si->cols2);
-	free(si->boxes1);
-	free(si->boxes2);
-	free(si->number);
+void free_sudoku_instance(SudokuInstance* si) {
+    free(si->empty);
+    free(si->rows);
+    free(si->cols);
+    free(si->boxes);
+    free(si->number);
 
 }
 
 
-bool test_set(uint64_t* part1, uint64_t* part2, int index, uint64_t mask) {
+bool test_set(uint16_t* part, int index, uint16_t mask) {
 
-    if (index < 7) {
-        if (*part1 & (mask << (index * 9))) {
-            return false;
-        }
-        *part1 |= (mask << (index * 9));
+    if (part[index] & mask) {
+        return false;
     }
-    else {
-        index -= 7;
-        if (*part2 & (mask << (index * 9))) {
-            return false;
-        }
-        *part2 |= (mask << (index * 9));
-    }
+    part[index] |= mask;
     return true;
 
 }
 
-int wrtie_board_to_instance(SudokuInstance si, int offset, char* board) {
+int wrtie_board_to_instance(SudokuInstance si, int board_nb, char* board) {
     char empty_ptr = 0;
-    si.rows1[offset] = si.rows2[offset] = 0;
-    si.cols1[offset] = si.cols2[offset] = 0;
-    si.boxes1[offset] = si.boxes2[offset] = 0;
+
+    // zero out 9 masks for rows/cols/boxes for this board
+    const int base = board_nb * 9;
+    for (int i = 0; i < 9; ++i) {
+        si.rows[base + i] = 0;
+        si.cols[base + i] = 0;
+        si.boxes[base + i] = 0;
+    }
+
     for (int i = 0; i < N2; ++i) {
+        si.boards[board_nb * N2 + i] = board[i];
         char ch = board[i];
         if (ch == '0') {
-            si.empty[offset * N2 + empty_ptr++] = (char)i;
+            si.empty[board_nb * N2 + empty_ptr++] = (char)i;
             continue;
         }
 
         int num = ch - '1';        // 0..8
-        uint64_t mask = (uint64_t)1 << num;
+        uint16_t mask = (uint16_t)1u << num;
 
         int row = i / 9;
         int col = i % 9;
         int box = (row / 3) * 3 + (col / 3);
 
-        if (!test_set(si.rows1 + offset, si.rows2 + offset, row, mask))
+        if (!test_set(si.rows + base, row, mask))
             return 1;
 
-        if (!test_set(si.cols1 + offset, si.cols2 + offset, col, mask))
+        if (!test_set(si.cols + base, col, mask))
             return 1;
 
-        if (!test_set(si.boxes1 + offset, si.boxes2 + offset, box, mask))
+        if (!test_set(si.boxes + base, box, mask))
             return 1;
     }
-	si.empty[offset * N2 + empty_ptr] = GUARD;
+    si.empty[board_nb * N2 + empty_ptr] = GUARD;
     return 0;
 }
 
 // todo przetestowac jeszcze raz
 void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
 {
-    SudokuInstance src = *sr;
-    SudokuInstance dst = *ds;
+    SudokuInstance& src = *sr;
+    SudokuInstance& dst = *ds;
 
     uint32_t out = 0;
 
@@ -439,70 +363,89 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
     {
         const size_t srcEmptyBase = (size_t)i * N2;
         char firstEmpty = src.empty[srcEmptyBase];
-        // todo druga granica dla out
-        if (firstEmpty == GUARD || out  >= BOARDS - i - N)
-        { 
+
+        // If no empties, copy board as-is (already solved or invalid)
+        if (firstEmpty == GUARD || out >= BOARDS - N)
+        {
             if (out >= BOARDS) {
                 fprintf(stderr, "multiply_boards: capacity exceeded (BOARDS)\n");
                 break;
             }
-            dst.rows1[out] = src.rows1[i];
-            dst.rows2[out] = src.rows2[i];
-            dst.cols1[out] = src.cols1[i];
-            dst.cols2[out] = src.cols2[i];
-            dst.boxes1[out] = src.boxes1[i];
-            dst.boxes2[out] = src.boxes2[i];
+
+            // Copy board chars
+            const size_t srcBoardBase = (size_t)i * N2;
+            const size_t dstBoardBase = (size_t)out * N2;
+            for (int k = 0; k < N2; ++k)
+                dst.boards[dstBoardBase + k] = src.boards[srcBoardBase + k];
+
+            // Copy masks (9 entries each)
+            const int srcBase = (int)i * 9;
+            const int dstBase = (int)out * 9;
+            for (int k = 0; k < 9; ++k) {
+                dst.rows[dstBase + k] = src.rows[srcBase + k];
+                dst.cols[dstBase + k] = src.cols[srcBase + k];
+                dst.boxes[dstBase + k] = src.boxes[srcBase + k];
+            }
+
+            // Empty list is just GUARD
             dst.empty[out * N2] = GUARD;
+
+            // Preserve identifier
             dst.number[out] = src.number[i];
             ++out;
             continue;
         }
 
+        // Determine row/col/box indices
         int row = firstEmpty / N;
         int col = firstEmpty % N;
         int box = (row / SQRTN) * SQRTN + (col / SQRTN);
 
-        uint64_t rowBits = (row < 7) ? (src.rows1[i] >> (row * 9)) : (src.rows2[i] >> ((row - 7) * 9));
-        uint64_t colBits = (col < 7) ? (src.cols1[i] >> (col * 9)) : (src.cols2[i] >> ((col - 7) * 9));
-        uint64_t boxBits = (box < 7) ? (src.boxes1[i] >> (box * 9)) : (src.boxes2[i] >> ((box - 7) * 9));
+        const int srcBase = (int)i * 9;
+
+        // Fetch per-group occupancy bitsets
+        uint16_t rowBits = src.rows[srcBase + row];
+        uint16_t colBits = src.cols[srcBase + col];
+        uint16_t boxBits = src.boxes[srcBase + box];
 
         for (int num = 0; num < 9; ++num)
         {
-            uint64_t mask = (uint64_t)1ULL << num;
+            uint16_t mask = (uint16_t)1u << num;
 
+            // Skip digits already present in row/col/box
             if ((rowBits & mask) || (colBits & mask) || (boxBits & mask))
-                continue; // digit not valid here
+                continue;
 
             if (out >= BOARDS) {
                 fprintf(stderr, "multiply_boards: capacity exceeded while expanding\n");
                 break;
             }
 
-            // Copy base masks
-            dst.rows1[out] = src.rows1[i];
-            dst.rows2[out] = src.rows2[i];
-            dst.cols1[out] = src.cols1[i];
-            dst.cols2[out] = src.cols2[i];
-            dst.boxes1[out] = src.boxes1[i];
-            dst.boxes2[out] = src.boxes2[i];
+            const int dstBase = (int)out * 9;
 
-            // Set the new digit bits
-            if (row < 7)
-                dst.rows1[out] |= mask << (row * 9);
-            else
-                dst.rows2[out] |= mask << ((row - 7) * 9);
+            // 1) Copy base masks
+            for (int k = 0; k < 9; ++k) {
+                dst.rows[dstBase + k] = src.rows[srcBase + k];
+                dst.cols[dstBase + k] = src.cols[srcBase + k];
+                dst.boxes[dstBase + k] = src.boxes[srcBase + k];
+            }
 
-            if (col < 7)
-                dst.cols1[out] |= mask << (col * 9);
-            else
-                dst.cols2[out] |= mask << ((col - 7) * 9);
+            // 2) Set the new digit bits
+            dst.rows[dstBase + row] |= mask;
+            dst.cols[dstBase + col] |= mask;
+            dst.boxes[dstBase + box] |= mask;
 
-            if (box < 7)
-                dst.boxes1[out] |= mask << (box * 9);
-            else
-                dst.boxes2[out] |= mask << ((box - 7) * 9);
+            // 3) Copy the source board and write the chosen digit at firstEmpty
+            const size_t srcBoardBase = (size_t)i * N2;
+            const size_t dstBoardBase = (size_t)out * N2;
+            for (int k = 0; k < N2; ++k)
+                dst.boards[dstBoardBase + k] = src.boards[srcBoardBase + k];
 
-            // Copy empty list excluding the first element
+            // Boards are ASCII '0'..'9'. Place digit (num 0..8 -> '1'+num)
+            dst.boards[dstBoardBase + firstEmpty] = (char)('1' + num);
+
+            // 4) Copy empty list excluding the first element (we just filled it)
+            //    Rebuild empties by taking src.empty from index 1 onward.
             size_t dstEmptyBase = (size_t)out * N2;
             int e = 0;
             for (;;)
@@ -514,32 +457,34 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
                 ++e;
             }
 
-            // Preserve board identification (or customize if needed)
+            // 5) Preserve board identification
             dst.number[out] = src.number[i];
+
             ++out;
         }
     }
 
-    (*ds).count = out;
+    dst.count = out;
 }
 
 
 
 SudokuInstance populate_boards(char* boards, int count) {
-	SudokuInstance generation_a = create_instance();
+    SudokuInstance generation_a = create_instance();
 
     SudokuInstance generation_b = create_instance();
 
     for (int i = 0; i < count; i++) {
-        if(wrtie_board_to_instance(generation_a, i, boards + i * LINE_LEN) != 0) {
+        if (wrtie_board_to_instance(generation_a, i, boards + i * LINE_LEN) != 0) {
             fprintf(stderr, "Invalid board at line %d\n", i + 1);
             exit(EXIT_FAILURE);
-		}
-		generation_a.number[i] = i;
+        }
+        generation_a.number[i] = i;
     }
 
     generation_a.count = count;
 
+	return generation_a;
 
     const int MAX_ITER = 2; // adjust as needed
     int iter = 0;
@@ -551,7 +496,7 @@ SudokuInstance populate_boards(char* boards, int count) {
         double factor = prevCount ? (double)dst->count / (double)prevCount : 0.0;
         printf("iter %d: %u -> %u (x%.3f)\n", iter, prevCount, dst->count, factor);
 
-        
+
         // Prepare next iteration
         prevCount = dst->count;
         SudokuInstance* tmp = src;
@@ -560,9 +505,9 @@ SudokuInstance populate_boards(char* boards, int count) {
         iter++;
     }
 
-	clear_sudoku_instance(dst);
+    free_sudoku_instance(dst);
 
-	return *src;
+    return *src;
 
 }
 
@@ -602,7 +547,7 @@ char* read_to_buff(int count, char* path) {
     size_t got = fread(buff, 1, expected, source);
     if (got != expected) {
         if (feof(source))
-            fprintf(stderr, "Too short file got %d lines but needs %d lines\n", got / LINE_LEN, expected / LINE_LEN);
+            fprintf(stderr, "Too short file got %d lines but needs %d lines\n", (int)(got / LINE_LEN), (int)(expected / LINE_LEN));
         usage();
         exit(EXIT_FAILURE);
     }
@@ -611,22 +556,19 @@ char* read_to_buff(int count, char* path) {
 
     return buff;
 }
+
 // todo debuugiing
-void print_uint64_bits(uint64_t value)
+void print_uint16_bits(uint16_t value)
 {
-    char buf[64 + 32 + 8 + 2]; // bits + spaces + 7 delimiters + newline + '\0'
+    char buf[16 + 4 + 2]; // bits + spaces + newline + '\0'
     int pos = 0;
-    for (int i = 0; i < 64; ++i)
+    for (int i = 0; i < 16; ++i)
     {
-        buf[pos++] = (char)(((value >> i) & 1ULL) ? '1' : '0');
+        buf[pos++] = (char)(((value >> i) & 1u) ? '1' : '0');
 
         // Space after each 4-bit chunk
         if (i % 4 == 3)
             buf[pos++] = ' ';
-
-        // Delimiter after each 9-bit group (i = 8,17,26,35,44,53,62)
-        if (i % 9 == 8 && i != 63) // skip after last full group unless you want trailing '|'
-            buf[pos++] = '|';
     }
     buf[pos++] = '\n';
     buf[pos] = '\0';
@@ -653,23 +595,74 @@ void print_board_pretty(const char* board81, int id)
     }
 }
 
-/// todo dotad
+void print_generated(SudokuInstance si)
+{
+    if (!si.boards) {
+        printf("No boards buffer (si.boards == nullptr)\n");
+        return;
+    }
+    if (si.count == 0) {
+        printf("No boards generated (si.count == 0)\n");
+        return;
+    }
+
+    for (uint32_t idx = 0; idx < si.count; ++idx) {
+        const char* board81 = si.boards + (size_t)idx * N2;
+
+        // Pretty header
+        printf("Generated board %u:\n", idx);
+        printf("+-------+-------+-------+\n");
+        for (int r = 0; r < 9; ++r) {
+            printf("| ");
+            for (int c = 0; c < 9; ++c)
+            {
+                char ch = board81[r * 9 + c];
+                if (ch == '0') ch = '.';
+                printf("%c ", ch);
+                if (c % 3 == 2) printf("| ");
+            }
+            printf("\n");
+            if (r % 3 == 2)
+                printf("+-------+-------+-------+\n");
+        }
+    }
+}
+
+void print_bulk_buffer(const char* bulk, int count)
+{
+    if (!bulk) {
+        printf("Buffer is null\n");
+        return;
+    }
+    if (count <= 0) {
+        printf("Nothing to print (count <= 0)\n");
+        return;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const char* line = bulk + (size_t)i * LINE_LEN;
+        printf("Line %d: ", i);
+
+        print_board_pretty(line, i);
+        printf("\n");
+    }
+}
+
+
 
 int main(int argc, char* argv[])
 {
-
     argc = 5;
 
-    argv[1] = "gpu";
-    argv[2] = "3";
-    argv[3] = "C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
+    argv[1] = (char*)"gpu";
+    argv[2] = (char*)"1";
+    argv[3] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
 
-   if (argc != 5) {
-        fprintf(stderr, "Invalid arguments. Expected exactly 4 parameters.\n");
+    if (argc != 5) {
+        fprintf(stderr, "Invalid arguments. Expected exactly 4 parameters.\n");    
         usage();
         return 1;
     }
-    
 
     const char* method = argv[1];
     const char* countStr = argv[2];
@@ -678,7 +671,7 @@ int main(int argc, char* argv[])
     if (strcmp(method, "cpu") != 0 && strcmp(method, "gpu") != 0) {
         fprintf(stderr, "Invalid method: '%s'. Allowed: 'cpu' or 'gpu'.\n", method);
         usage();
-		exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE);
     }
 
     int count = stoi(countStr);
@@ -691,36 +684,12 @@ int main(int argc, char* argv[])
 
     auto t0 = chrono::high_resolution_clock::now();
     char* buff = read_to_buff(count, argv[3]);
-	SudokuInstance si = populate_boards(buff, count);
+    SudokuInstance si = populate_boards(buff, count);
 
     auto t1 = chrono::high_resolution_clock::now();
     auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
     printf("time %.3f ms\n", us / 1000.0);
-    
-    /*
-    for (int j = 0; j < count; ++j)
-    {
-        const char* line = buff + j * LINE_LEN;
 
-        bool ok = true;
-        for (int k = 0; k < 81; ++k)
-        {
-            char ch = line[k];
-            if (ch < '0' || ch > '9')
-            {
-                ok = false;
-				fprintf(stderr, "Invalid character '%c' in board %d at position %d\n", ch, j, k);
-            }
-        }
-        if (!ok)
-        {
-            fprintf(stderr, "Invalid character in board %d\n", j);
-            return 1;
-        }
-
-        print_board_pretty(line, j);
-    }
-    */
 
 
     t0 = chrono::high_resolution_clock::now();
@@ -732,14 +701,11 @@ int main(int argc, char* argv[])
     }
 
 
-     t1 = chrono::high_resolution_clock::now();
-     us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-     printf("kernel time %.3f ms\n", us / 1000.0);
+    t1 = chrono::high_resolution_clock::now();
+    us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+    printf("kernel time %.3f ms\n", us / 1000.0);
 
 
-
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaDeviceReset failed!");
