@@ -2,8 +2,7 @@
 #include "device_launch_parameters.h"
 
 
-#include "stdio.h";
-
+#include "stdio.h"
 
 
 #define GUARD 82
@@ -17,16 +16,12 @@
 #define THREADSPERBLOCK 1
 
 
-
-//// do testow
-//#include <iostream>
 #include <chrono>
 using namespace std;
 
 struct SudokuInstance {
     char* empty;
 
-    // 9 uint16_t masks per board for rows, cols and boxes
     uint16_t* rows;   // size: count * 9
     uint16_t* cols;   // size: count * 9
     uint16_t* boxes;  // size: count * 9
@@ -38,13 +33,19 @@ struct SudokuInstance {
     uint32_t count;
 };
 
+struct Solutions {
+    int* flags;   
+    char* stacks;       
+    char* empties;      
+};
+
 
 __device__ void DFS(uint16_t* rows,
     uint16_t* cols,
     uint16_t* boxes,
     char* empty, char* stack);
 
-__global__ void sudokuKernel(SudokuInstance si, char* board)
+__global__ void sudokuKernel(SudokuInstance si, Solutions sl)
 {
     const int gid = blockIdx.x * blockDim.x + threadIdx.x;
     const int tid = threadIdx.x;
@@ -55,7 +56,7 @@ __global__ void sudokuKernel(SudokuInstance si, char* board)
     extern __shared__ char smem[];
     char* threadBase = smem + tid * (2 * N2);
     char* emptySh = threadBase;
-    char* stackSh = threadBase + N2;
+   // char* stackSh = threadBase + N2;
 
 
     char* emptyGlobal = si.empty + gid * N2;
@@ -77,38 +78,38 @@ __global__ void sudokuKernel(SudokuInstance si, char* board)
         boxesLoc[i] = si.boxes[base + i];
     }
 
+	char stackSh[N2];
+
     DFS(
         rowsLoc, colsLoc, boxesLoc,
-        emptySh, stackSh
+		emptyGlobal, stackSh
     );
 
-   /* if (stackSh[0] == NO_SOL)
-        printf("%d No solution\n", gid);
-    else {
-        printf("%d Solution\n", gid);
-        printf("%d empty: [%d,%d,%d]\n stack : [% d, % d, % d]\n", gid, emptySh[0], emptySh[1], emptySh[2], stackSh[0], stackSh[1], stackSh[2]);
-    }*/
+    if (stackSh[0] == NO_SOL)
+        return;
+
+     
+    if (atomicExch(sl.flags + gid, 1) != 0) {
+        atomicExch(sl.flags + gid, 2);
+        return;
+    }
+
+
+
+	//todo memcpy??
+	uint32_t base2 = si.number[gid] * N2;
+    for(int i = 0; i < N2; ++i) {
+        if (emptySh[i] == GUARD)
+            break;
+
+		sl.empties[base2 + i] = emptySh[i];
+		sl.stacks[base2 + i] = stackSh[i];
+	}
+
 
     return;
 }
 
-__device__ void sol_and_fill(uint16_t* rows,
-    uint16_t* cols,
-    uint16_t* boxes,
-    char* empty, char* stack, char* board) {
-
-    DFS(rows,
-        cols,
-        boxes,
-        empty, stack);
-
-   /* if (stack[0] == NO_SOL)
-        printf("No solution\n");
-    else {
-        printf("Solution: ");
-    }*/
-
-}
 
 __device__ void DFS(uint16_t* rows,
     uint16_t* cols,
@@ -120,7 +121,12 @@ __device__ void DFS(uint16_t* rows,
     stack[0] = -1;
 
     bool found = true;
-    while (depth >= 0) {
+    while (true) {
+        if (depth < 0) {
+            // no sol
+            stack[0] = NO_SOL;
+            return;
+        }
         // at the end of indcies of empty indexes should be guard
         char ind = empty[depth];
         if (ind == GUARD) {
@@ -135,11 +141,7 @@ __device__ void DFS(uint16_t* rows,
 
         // deleteing mask of number that is being backtracked
         if (!found) {
-            if (depth < 0) {
-                // no sol
-                stack[0] = NO_SOL;
-                return;
-            }
+            
 
             uint16_t mask = (uint16_t)1u << (stack[depth]);
 
@@ -180,9 +182,8 @@ __device__ void DFS(uint16_t* rows,
 
 
 
-cudaError_t SudokuCuda(SudokuInstance si, char* board)
+cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret)
 {
-
 
     cudaError_t cudaStatus;
 
@@ -194,6 +195,18 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
 
 
     SudokuInstance d_si = {};
+    Solutions d_sl = {};
+	Solutions h_sl = {};
+
+
+
+    size_t solCount = (size_t)si.count * N2 * sizeof(char);
+    size_t flagCount = (size_t)si.count * sizeof(int);
+
+	h_sl.empties = (char*)malloc(solCount);
+    h_sl.stacks = (char*)malloc(solCount);
+    h_sl.flags = (int*)malloc(flagCount);
+    
 
     size_t boardsCount = si.count;
     size_t maskCount16x9 = boardsCount * 9 * sizeof(uint16_t);
@@ -207,8 +220,11 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
     if ((cudaStatus = cudaMalloc((void**)&d_si.boxes, maskCount16x9)) != cudaSuccess) goto AllocError;
     if ((cudaStatus = cudaMalloc((void**)&d_si.empty, emptyCountChar)) != cudaSuccess) goto AllocError;
     if ((cudaStatus = cudaMalloc((void**)&d_si.number, numberCount32)) != cudaSuccess) goto AllocError;
-    char* d_boards = nullptr;
-    if ((cudaStatus = cudaMalloc((void**)&d_boards, boardsCount * N2)) != cudaSuccess) goto AllocError;
+
+    if ((cudaStatus = cudaMalloc((void**)&d_sl.empties, solCount)) != cudaSuccess) goto AllocError;
+    if ((cudaStatus = cudaMalloc((void**)&d_sl.stacks, solCount)) != cudaSuccess) goto AllocError;
+    if ((cudaStatus = cudaMalloc((void**)&d_sl.flags, solCount)) != cudaSuccess) goto AllocError;
+	if ((cudaStatus = cudaMemset(d_sl.flags, 0, flagCount)) != cudaSuccess) goto AllocError;
 
     if ((cudaStatus = cudaMemcpy(d_si.rows, si.rows, maskCount16x9, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
     if ((cudaStatus = cudaMemcpy(d_si.cols, si.cols, maskCount16x9, cudaMemcpyHostToDevice)) != cudaSuccess) goto CopyError;
@@ -219,17 +235,24 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
     d_si.count = si.count;
 
     int block = d_si.count / THREADSPERBLOCK + 1;
+    cudaStatus = cudaDeviceSynchronize();
+    if (cudaStatus != cudaSuccess) {
+        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching sudokuKernel!\n", cudaStatus);
+        goto Error;
+    }
 
 
+    
     auto t0 = chrono::high_resolution_clock::now();
 
+    sudokuKernel <<< block, THREADSPERBLOCK >>> (d_si, d_sl);
 
-    sudokuKernel <<< block, THREADSPERBLOCK >>> (d_si, d_boards);
 
-    auto t1 = chrono::high_resolution_clock::now();
-    auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-    printf("alloc %.3f ms\n", us / 1000.0);
+    if ((cudaStatus = cudaMemcpy(h_sl.stacks, d_sl.stacks, solCount, cudaMemcpyDeviceToHost)) != cudaSuccess) goto CopyError;
+    if ((cudaStatus = cudaMemcpy(h_sl.empties, d_sl.empties, solCount, cudaMemcpyDeviceToHost)) != cudaSuccess) goto CopyError;
+    if ((cudaStatus = cudaMemcpy(h_sl.flags, d_sl.flags, flagCount, cudaMemcpyDeviceToHost)) != cudaSuccess) goto CopyError;
 
+	*ret = h_sl;
 
     // Check for any errors launching the kernel
     cudaStatus = cudaGetLastError();
@@ -246,6 +269,11 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board)
         goto Error;
     }
 
+    auto t1 = chrono::high_resolution_clock::now();
+    auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+    printf("kernell call %.3f ms\n", us / 1000.0);
+
+
 CopyError:
 AllocError:
 Error:
@@ -255,7 +283,9 @@ Error:
     cudaFree(d_si.boxes);
     cudaFree(d_si.empty);
     cudaFree(d_si.number);
-    cudaFree(d_boards);
+
+	cudaFree(d_sl.empties);
+    cudaFree(d_sl.stacks);
 
     return cudaStatus;
 }
@@ -271,7 +301,7 @@ Error:
     (fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), perror(source), exit(EXIT_FAILURE))
 
 
-#define BOARDS 9000 //9 tys
+#define BOARDS 40000 //40 tys
 
 
 
@@ -484,9 +514,8 @@ SudokuInstance populate_boards(char* boards, int count) {
 
     generation_a.count = count;
 
-	return generation_a;
 
-    const int MAX_ITER = 2; // adjust as needed
+    const int MAX_ITER = 4; // adjust as needed
     int iter = 0;
     SudokuInstance* src = &generation_a;
     SudokuInstance* dst = &generation_b;
@@ -650,12 +679,17 @@ void print_bulk_buffer(const char* bulk, int count)
 
 
 
+void set_solutions(SudokuInstance si, Solutions sl, char* boards) {
+
+
+}
+
 int main(int argc, char* argv[])
 {
     argc = 5;
 
     argv[1] = (char*)"gpu";
-    argv[2] = (char*)"1";
+    argv[2] = (char*)"10";
     argv[3] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
 
     if (argc != 5) {
@@ -690,11 +724,12 @@ int main(int argc, char* argv[])
     auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
     printf("time %.3f ms\n", us / 1000.0);
 
+	Solutions sl = {};
 
 
     t0 = chrono::high_resolution_clock::now();
 
-    cudaError_t cudaStatus = SudokuCuda(si, buff);
+    cudaError_t cudaStatus = SudokuCuda(si, buff,&sl);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "SudokuCuda failed!");
         return 1;
@@ -703,8 +738,9 @@ int main(int argc, char* argv[])
 
     t1 = chrono::high_resolution_clock::now();
     us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-    printf("kernel time %.3f ms\n", us / 1000.0);
+    printf("whole kernel time %.3f ms\n", us / 1000.0);
 
+    set_solutions(si, sl, buff);
 
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {
