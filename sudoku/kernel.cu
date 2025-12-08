@@ -24,22 +24,19 @@ using namespace std;
 struct SudokuInstance {
     char* empty;
 
-    uint16_t* rows;   // size: count * 9
-    uint16_t* cols;   // size: count * 9
-    uint16_t* boxes;  // size: count * 9
+    uint16_t* rows;   
+    uint16_t* cols;   
+    uint16_t* boxes;  
 
-    uint32_t* number; // moze byc zmiejszone na 16 jesli rozwazane co najwyzej 8k watkow
+    uint32_t* number; 
+
 
     char* boards;
-
     uint32_t count;
 };
 
 struct Solutions {
     int* flags;
-    char* stacks;
-    char* empties;
-    // Added: solved board lines buffer (81 chars + CR + LF per board)
     char* lines;
 };
 
@@ -51,31 +48,18 @@ __device__ void DFS(uint16_t* rows,
 
 __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
 {
-    const int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int tid = threadIdx.x;
-    if (gid >= (int)si.count) return;
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= (int)si.count) 
+        return;
 
-    // Per-thread shared slice: [empty (N2 bytes) | stack (N2 bytes)]
-
-    extern __shared__ char smem[];
-    char* threadBase = smem + tid * (2 * N2);
-    char* emptySh = threadBase;
-   // char* stackSh = threadBase + N2;
+    auto emptySh = si.empty + id * N2;
+    auto  emptyGlobal = si.empty + id * N2;
 
 
-    char* emptyGlobal = si.empty + gid * N2;
-    for (int i = 0; i < N2; ++i) {
-        emptySh[i] = emptyGlobal[i];
-        if (emptyGlobal[i] == GUARD) break;
-    }
-
-    emptySh = emptyGlobal;
-
-    // Load 16-bit occupancy masks for this board into local arrays
     uint16_t rowsLoc[9];
     uint16_t colsLoc[9];
     uint16_t boxesLoc[9];
-    const int base = gid * 9;
+    const int base = id * 9;
     for (int i = 0; i < 9; ++i) {
         rowsLoc[i] = si.rows[base + i];
         colsLoc[i] = si.cols[base + i];
@@ -85,32 +69,23 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
 	char stackSh[N2];
 
     DFS(
-        rowsLoc, colsLoc, boxesLoc,
+        si.rows + id * 9,
+        si.cols + id * 9,
+        si.boxes + id * 9,
 		emptyGlobal, stackSh
     );
 
     if (stackSh[0] == NO_SOL)
         return;
 
-    int prev = atomicExch(sl.flags + gid, 1);
+    int prev = atomicExch(sl.flags + id, 1);
     if (prev != 0) {
-        atomicExch(sl.flags + gid, 2);
+        atomicExch(sl.flags + id, 2);
         return;
     }
 
-    // Copy empties + stacks (existing behavior)
-	uint32_t base2 = si.number[gid] * N2;
-    for(int i = 0; i < N2; ++i) {
-        if (emptySh[i] == GUARD)
-            break;
 
-		sl.empties[base2 + i] = emptySh[i];
-		sl.stacks[base2 + i] = stackSh[i];
-	}
-
-    // NEW: Write solved board line (81 chars + CR LF)
-    // We need original board to overlay solved digits for empties.
-    const char* originalBoard = si.boards + (size_t)gid * N2;
+    const char* originalBoard = si.boards + (size_t)id * N2;
     char solved[81];
     // Start with original board
     for (int i = 0; i < 81; ++i)
@@ -125,7 +100,7 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     }
 
     // Store into lines buffer
-    char* line = sl.lines + (size_t)gid * LINE_LEN;
+    char* line = sl.lines + (size_t)id * LINE_LEN;
     for (int i = 0; i < 81; ++i)
         line[i] = solved[i];
     line[81] = '\r';
@@ -196,8 +171,8 @@ void create_empty_sudoku_instance(SudokuInstance* instance) {
 
 Solutions create_empty_solutions() {
     Solutions sl{};
-    sl.empties = nullptr;
-    sl.stacks = nullptr;
+   /* sl.empties = nullptr;
+    sl.stacks = nullptr;*/
     sl.flags = nullptr;
     sl.lines = nullptr;
     return sl;
@@ -225,8 +200,8 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret)
     const size_t boardsChars    = boardsCount * N2 * sizeof(char);
 
     // Allocate host buffers early (so we can safely assign *ret on failure if needed).
-    h_sl.empties = (char*)malloc(solCount);
-    h_sl.stacks  = (char*)malloc(solCount);
+   /* h_sl.empties = (char*)malloc(solCount);
+    h_sl.stacks  = (char*)malloc(solCount);*/
     h_sl.flags   = (int*)malloc(flagCount);
     h_sl.lines   = (char*)malloc(lineCount);
 
@@ -246,8 +221,8 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret)
         if ((cudaStatus = cudaMalloc((void**)&d_si.number, numberCount32))  != cudaSuccess) break;
         if ((cudaStatus = cudaMalloc((void**)&d_si.boards, boardsChars))    != cudaSuccess) break;
 
-        if ((cudaStatus = cudaMalloc((void**)&d_sl.empties, solCount)) != cudaSuccess) break;
-        if ((cudaStatus = cudaMalloc((void**)&d_sl.stacks,  solCount)) != cudaSuccess) break;
+       /* if ((cudaStatus = cudaMalloc((void**)&d_sl.empties, solCount)) != cudaSuccess) break;
+        if ((cudaStatus = cudaMalloc((void**)&d_sl.stacks,  solCount)) != cudaSuccess) break;*/
         if ((cudaStatus = cudaMalloc((void**)&d_sl.flags,   flagCount)) != cudaSuccess) break;
         if ((cudaStatus = cudaMemset(d_sl.flags, 0, flagCount)) != cudaSuccess) break;
         if ((cudaStatus = cudaMalloc((void**)&d_sl.lines,   lineCount)) != cudaSuccess) break;
@@ -281,9 +256,9 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret)
             break;
         }
 
-        // Copy back
-        if ((cudaStatus = cudaMemcpy(h_sl.stacks,  d_sl.stacks,  solCount,  cudaMemcpyDeviceToHost)) != cudaSuccess) break;
-        if ((cudaStatus = cudaMemcpy(h_sl.empties, d_sl.empties, solCount,  cudaMemcpyDeviceToHost)) != cudaSuccess) break;
+        //// Copy back
+        //if ((cudaStatus = cudaMemcpy(h_sl.stacks,  d_sl.stacks,  solCount,  cudaMemcpyDeviceToHost)) != cudaSuccess) break;
+        //if ((cudaStatus = cudaMemcpy(h_sl.empties, d_sl.empties, solCount,  cudaMemcpyDeviceToHost)) != cudaSuccess) break;
         if ((cudaStatus = cudaMemcpy(h_sl.flags,   d_sl.flags,   flagCount, cudaMemcpyDeviceToHost)) != cudaSuccess) break;
         if ((cudaStatus = cudaMemcpy(h_sl.lines,   d_sl.lines,   lineCount, cudaMemcpyDeviceToHost)) != cudaSuccess) break;
 
@@ -304,8 +279,8 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret)
     cudaFree(d_si.number);
     cudaFree(d_si.boards);
 
-    cudaFree(d_sl.empties);
-    cudaFree(d_sl.stacks);
+   // cudaFree(d_sl.empties);
+   // cudaFree(d_sl.stacks);
     cudaFree(d_sl.lines);
     cudaFree(d_sl.flags);
 
