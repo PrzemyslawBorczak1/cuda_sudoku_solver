@@ -5,6 +5,11 @@
 #include "stdio.h"
 
 
+#include <string>
+#include <cstdio> 
+#include <chrono>
+
+
 #define GUARD 82
 #define NO_SOL 83
 
@@ -18,7 +23,12 @@
 #define LINE_LEN 83
 
 
-#include <chrono>
+
+#define BOARDS 100000 //100 tys
+#define MAX_ITER 5
+
+
+
 using namespace std;
 
 struct SudokuInstance {
@@ -48,7 +58,7 @@ __device__ void DFS(uint16_t* rows,
 
 __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
 {
-    uint32_t id = blockIdx.x + threadIdx.x;
+    uint32_t id = blockIdx.x * THREADSPERBLOCK + threadIdx.x;
     if (id >= si.count) 
         return;
 
@@ -307,14 +317,6 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret, uint32_t 
 
 
 
-#include <string>
-#include <cstdio> 
-
-
-#define BOARDS 80000 //100 tys
-#define MAX_ITER 4
-
-
 typedef struct Node {
     Node* next;
     char val;
@@ -353,19 +355,6 @@ void write_to_tab(Node* head, char* tab, char* top) {
         head = head->next;
 		free(temp);
     }
-}
-
-void swap(char* a, char* b) {
-    char temp = *a;
-    *a = *b;
-    *b = temp;
-}
-void cycle(char arr[81], int end) {
-	char tmp = arr[end - 1];
-    for (int i = end - 1; i > 0; i--) {
-        arr[i] = arr[i - 1];
-    }
-	arr[0] = tmp;
 }
 
 
@@ -427,11 +416,10 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
         char ch = board[i];
         if (ch == '0') {
             buff[empty_ptr++] = i;
-            //si.empty[board_nb * N2 + empty_ptr++] = i;
             continue;
         }
 
-        int num = ch - '1';        // 0..8
+        int num = ch - '1';   
         uint16_t mask = 1 << num;
 
         int row = i / 9;
@@ -471,11 +459,6 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
 	}
 
     si.empty[board_nb * N2 + empty_ptr ] = GUARD;
-
-	//cycle(si.empty + board_nb * N2, empty_ptr);
-	//cycle(si.empty + board_nb * N2, empty_ptr);
-
-
 
 
     return 0;
