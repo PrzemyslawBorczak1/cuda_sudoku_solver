@@ -311,10 +311,62 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret, uint32_t 
 #include <cstdio> 
 
 
-#define BOARDS 400000 //40 tys
-#define MAX_ITER 10
+#define BOARDS 80000 //100 tys
+#define MAX_ITER 4
 
 
+typedef struct Node {
+    Node* next;
+    char val;
+} Node;
+
+void add_node(Node** head, char value) {
+    Node* new_node = (Node*)malloc(sizeof(Node));
+    new_node->val = value;
+
+    if(*head == 0) {
+        new_node->next = nullptr;
+        *head = new_node;
+        return;
+	}
+
+    new_node->next = *head;
+    *head = new_node;
+}
+
+char max(char a, char b) {
+    return (a > b) ? a : b;
+}
+char max(char a, char b, char c) {
+    return max(max(a, b), c);
+}
+
+void write_to_tab(Node* head, char* tab, char* top) {
+    if (tab == nullptr || top == nullptr) {
+        return;
+    }
+
+    while (head != nullptr) {
+        tab[*top] = head->val;
+        (*top)++;
+		Node* temp = head;
+        head = head->next;
+		free(temp);
+    }
+}
+
+void swap(char* a, char* b) {
+    char temp = *a;
+    *a = *b;
+    *b = temp;
+}
+void cycle(char arr[81], int end) {
+	char tmp = arr[end - 1];
+    for (int i = end - 1; i > 0; i--) {
+        arr[i] = arr[i - 1];
+    }
+	arr[0] = tmp;
+}
 
 
 SudokuInstance create_instance() {
@@ -342,7 +394,6 @@ void freeSudokuInstance(SudokuInstance* si) {
 
 }
 
-
 bool test_set(uint16_t* part, int index, uint16_t mask) {
 
     if (part[index] & mask) {
@@ -353,10 +404,17 @@ bool test_set(uint16_t* part, int index, uint16_t mask) {
 
 }
 
+
+
+
 int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
+	char counters[27] = { 0 };
+	char buff[81];
+    Node* nodes[9] = { 0 };
+
+
     char empty_ptr = 0;
 
-    // zero out 9 masks for rows/cols/boxes for this board
     const int base = board_nb * 9;
     for (int i = 0; i < 9; ++i) {
         si.rows[base + i] = 0;
@@ -368,12 +426,13 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
         si.boards[board_nb * N2 + i] = board[i];
         char ch = board[i];
         if (ch == '0') {
-            si.empty[board_nb * N2 + empty_ptr++] = (char)i;
+            buff[empty_ptr++] = i;
+            //si.empty[board_nb * N2 + empty_ptr++] = i;
             continue;
         }
 
         int num = ch - '1';        // 0..8
-        uint16_t mask = (uint16_t)1u << num;
+        uint16_t mask = 1 << num;
 
         int row = i / 9;
         int col = i % 9;
@@ -381,14 +440,44 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
 
         if (!test_set(si.rows + base, row, mask))
             return 1;
+		counters[row]++;
+
 
         if (!test_set(si.cols + base, col, mask))
             return 1;
+        counters[9 + col]++;
 
         if (!test_set(si.boxes + base, box, mask))
             return 1;
+		counters[18 + box]++;
     }
-    si.empty[board_nb * N2 + empty_ptr] = GUARD;
+	buff[empty_ptr] = GUARD;
+
+    for (int i = 0; i < empty_ptr; i++) {
+
+        int row = buff[i] / 9;
+        int col = buff[i] % 9;
+        int box = (row / 3) * 3 + (col / 3);
+
+		char m = max(counters[row], counters[9 + col], counters[18 + box]);
+
+		add_node(&nodes[m], buff[i]);
+
+    }
+
+	empty_ptr = 0;
+    for(int i = 8; i >= 0 ; i--) {
+        write_to_tab(nodes[i], si.empty + board_nb * N2, &empty_ptr);
+	}
+
+    si.empty[board_nb * N2 + empty_ptr ] = GUARD;
+
+	//cycle(si.empty + board_nb * N2, empty_ptr);
+	//cycle(si.empty + board_nb * N2, empty_ptr);
+
+
+
+
     return 0;
 }
 
@@ -425,7 +514,6 @@ void copyBoard(SudokuInstance* src, SudokuInstance* dst, uint32_t src_id, uint32
 	dst->count++;
 }
 
-
 bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_id, uint32_t dst_id, int num, int empty_id) {
 
     uint16_t mask = 1 << num;
@@ -434,7 +522,7 @@ bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_
 	uint32_t srcBase = src_id * 9;
 
 	char* empty = src.empty + src_id * N2;
-	char firstEmpty = empty[0];
+	char firstEmpty = empty[empty_id];
 
     int row = firstEmpty / N;
     int col = firstEmpty % N;
@@ -485,8 +573,6 @@ bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_
 	return true;
 }
 
-
-
 void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
 {
     SudokuInstance& src = *sr;
@@ -511,7 +597,7 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
         for (int num = 0; num < 9; ++num)
         {
             
-			if(tryAddNumberToBoard(src, dst, i, out, num, empty[0]) == false)
+			if(tryAddNumberToBoard(src, dst, i, out, num, 0) == false)
 				continue;
 
             ++out;
@@ -521,14 +607,13 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
     dst.count = out;
 }
 
-
 SudokuInstance populate_boards(char* boards, int count) {
     SudokuInstance generation_a = create_instance();
     SudokuInstance generation_b = create_instance();
 
     for (int i = 0; i < count; i++) {
         if (wrtieBoardToInstance(generation_a, i, boards + i * LINE_LEN) != 0) {
-            fprintf(stderr, "Invalid board at line %d\n", i + 1);
+            printf("Invalid board at line %d\n", i + 1);
             exit(EXIT_FAILURE);
         }
         generation_a.number[i] = i;
@@ -550,8 +635,8 @@ SudokuInstance populate_boards(char* boards, int count) {
         src = dst;
         dst = tmp;
 
-        if (factor < 1.5)
-            break;
+       /* if (factor < 1.5)
+            break;*/
         if (dst->count >= BOARDS / 0.9)
             break;
     }
@@ -569,7 +654,6 @@ SudokuInstance populate_boards(char* boards, int count) {
 
 
 
-
 void usage() {
     printf("Usage:\n");
     printf("  sudoku method count input_file output_file\n");
@@ -579,7 +663,6 @@ void usage() {
     printf("  input_file   : path to input text file with 81-digit boards per line (0 for empty)\n");
     printf("  output_file  : path to output text file (will be created/overwritten)\n");
 }
-
 
 char* read_to_buff(int count, char* path) {
 
@@ -612,6 +695,45 @@ char* read_to_buff(int count, char* path) {
 
     return buff;
 }
+
+void write_solutions_to_file(Solutions sl, const char* outputPath, uint32_t sol_count)
+{
+    if (!outputPath) {
+        fprintf(stderr, "Output path is null\n");
+        return;
+    }
+
+    FILE* out = fopen(outputPath, "wb");
+    if (!out) {
+        fprintf(stderr, "Could not open output file: '%s'\n", outputPath);
+        return;
+    }
+
+    // Write solved boards as single 81-char lines with CRLF.
+    for (uint32_t i = 0; i < sol_count; ++i) {
+        if (sl.flags[i] == 0)
+            continue;
+
+        const char* line = sl.lines + (size_t)i * LINE_LEN;
+        // write 81 chars
+        if (fwrite(line, 1, 81, out) != 81) {
+            fprintf(stderr, "Failed to write board %u\n", i);
+            break;
+        }
+        // write CRLF
+        static const char crlf[2] = { '\r', '\n' };
+        if (fwrite(crlf, 1, 2, out) != 2) {
+            fprintf(stderr, "Failed to write CRLF for board %u\n", i);
+            break;
+        }
+    }
+
+    fclose(out);
+}
+
+
+
+
 
 // todo debuugiing
 void print_uint16_bits(uint16_t value)
@@ -704,18 +826,17 @@ void print_bulk_buffer(const char* bulk, int count)
     }
 }
 
-
-
 void print_solutions(SudokuInstance si, Solutions sl, char* boardsm, uint32_t sol_count) 
 {
-    // Print solved boards as single 81-char lines (matching requested format).
     for (uint32_t i = 0; i < sol_count; ++i) {
         int flag = sl.flags[i];
-        if (flag == 0)
+        if (flag != 1) {
+			printf("(flag=%d):\n", flag);
             continue;
+        }
 
         const char* line = sl.lines + (size_t)i * LINE_LEN;
-
+        continue;
         printf("%u: ", i);
         for (int k = 0; k < 81; ++k)
             printf("%c", line[k]);
@@ -723,47 +844,13 @@ void print_solutions(SudokuInstance si, Solutions sl, char* boardsm, uint32_t so
     }
 }
 
-void write_solutions_to_file(SudokuInstance si, Solutions sl, const char* outputPath, uint32_t sol_count)
-{
-    if (!outputPath) {
-        fprintf(stderr, "Output path is null\n");
-        return;
-    }
-
-    FILE* out = fopen(outputPath, "wb");
-    if (!out) {
-        fprintf(stderr, "Could not open output file: '%s'\n", outputPath);
-        return;
-    }
-
-    // Write solved boards as single 81-char lines with CRLF.
-    for (uint32_t i = 0; i < sol_count; ++i) {
-        if (sl.flags[i] == 0)
-            continue;
-
-        const char* line = sl.lines + (size_t)i * LINE_LEN;
-        // write 81 chars
-        if (fwrite(line, 1, 81, out) != 81) {
-            fprintf(stderr, "Failed to write board %u\n", i);
-            break;
-        }
-        // write CRLF
-        static const char crlf[2] = { '\r', '\n' };
-        if (fwrite(crlf, 1, 2, out) != 2) {
-            fprintf(stderr, "Failed to write CRLF for board %u\n", i);
-            break;
-        }
-    }
-
-    fclose(out);
-}
 
 int main(int argc, char* argv[])
 {
-    argc = 5;
+   argc = 5;
 
     argv[1] = (char*)"gpu";
-    argv[2] = (char*)"10";
+    argv[2] = (char*)"100";
     argv[3] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
 	argv[4] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\out2";
 
@@ -816,7 +903,7 @@ int main(int argc, char* argv[])
     printf("whole kernel time %.3f ms\n", us / 1000.0);
 
     print_solutions(si, sl, buff, count);
-    write_solutions_to_file(si, sl, outputPath, count);
+    write_solutions_to_file(sl, outputPath, count);
 
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {
