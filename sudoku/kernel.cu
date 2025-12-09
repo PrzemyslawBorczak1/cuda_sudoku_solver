@@ -52,8 +52,8 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     if (id >= (int)si.count) 
         return;
 
-    auto emptySh = si.empty + id * N2;
-    auto  emptyGlobal = si.empty + id * N2;
+    auto empty = si.empty + id * N2;
+	char stack[N2];
 
 
     uint16_t rowsLoc[9];
@@ -66,16 +66,15 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
         boxesLoc[i] = si.boxes[base + i];
     }
 
-	char stackSh[N2];
 
     DFS(
         si.rows + id * 9,
         si.cols + id * 9,
         si.boxes + id * 9,
-		emptyGlobal, stackSh
+		empty, stack
     );
 
-    if (stackSh[0] == NO_SOL)
+    if (stack[0] == NO_SOL)
         return;
 
     int prev = atomicExch(sl.flags + id, 1);
@@ -85,29 +84,21 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     }
 
 
-    const char* originalBoard = si.boards + (size_t)id * N2;
-    char solved[81];
-    // Start with original board
-    for (int i = 0; i < 81; ++i)
-        solved[i] = originalBoard[i];
+    char i = 0;
+	char* brd = si.boards + id * N2;
+    while(empty[i] != GUARD) {
+        brd[empty[i]] = '1' + stack[i];
+        i++;
+	}
 
-    // Fill solved digits
-    for (int d = 0; ; ++d) {
-        char idx = emptyGlobal[d];
-        if (idx == GUARD) break;
-        char digit = (char)('1' + stackSh[d]); // stackSh holds 0..8
-        solved[(int)idx] = digit;
-    }
-
-    // Store into lines buffer
-    char* line = sl.lines + (size_t)id * LINE_LEN;
+    char* line = sl.lines + id * LINE_LEN;
     for (int i = 0; i < 81; ++i)
-        line[i] = solved[i];
+        line[i] = brd[i];
+
     line[81] = '\r';
     line[82] = '\n';
 }
 
-// Add missing DFS definition (was only declared before, causing unresolved extern).
 __device__ void DFS(uint16_t* rows,
     uint16_t* cols,
     uint16_t* boxes,
@@ -130,15 +121,15 @@ __device__ void DFS(uint16_t* rows,
         char box = (char)((row / 3) * 3 + (col / 3));
 
         if (!found) {
-            uint16_t mask = (uint16_t)1u << (stack[depth]);
-            rows[row] &= (uint16_t)~mask;
-            cols[col] &= (uint16_t)~mask;
-            boxes[box] &= (uint16_t)~mask;
+            uint16_t mask = (uint16_t)1 << (stack[depth]);
+            rows[row] &= ~mask;
+            cols[col] &= ~mask;
+            boxes[box] &= ~mask;
         }
 
         found = false;
         for (char num = (char)(stack[depth] + 1); num < 9; num++) {
-            uint16_t mask = (uint16_t)1u << (num);
+            uint16_t mask = (uint16_t)1 << (num);
             if ((rows[row] & mask) ||
                 (cols[col] & mask) ||
                 (boxes[box] & mask))
@@ -171,8 +162,6 @@ void create_empty_sudoku_instance(SudokuInstance* instance) {
 
 Solutions create_empty_solutions() {
     Solutions sl{};
-   /* sl.empties = nullptr;
-    sl.stacks = nullptr;*/
     sl.flags = nullptr;
     sl.lines = nullptr;
     return sl;
