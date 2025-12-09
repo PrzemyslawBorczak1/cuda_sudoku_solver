@@ -311,7 +311,8 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret, uint32_t 
 #include <cstdio> 
 
 
-#define BOARDS 400000 //400 tys
+#define BOARDS 400000 //40 tys
+#define MAX_ITER 10
 
 
 
@@ -391,188 +392,133 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
     return 0;
 }
 
-// todo przetestowac jeszcze raz
+
+
+
+
+
+void copyBoard(SudokuInstance* src, SudokuInstance* dst, uint32_t src_id, uint32_t dst_id) {
+    const size_t srcBoardBase = src_id * N2;
+    const size_t dstBoardBase = dst_id * N2;
+
+    for (uint32_t i = 0; i < N2; i++)
+        dst->boards[dstBoardBase + i] = src->boards[srcBoardBase + i];
+
+    const uint32_t srcBase = src_id * N;
+    const uint32_t dstBase = dst_id * N;
+
+    for (uint32_t i = 0; i < 9; i++) {
+        dst->rows[dstBase + i] = src->rows[srcBase + i];
+        dst->cols[dstBase + i] = src->cols[srcBase + i];
+        dst->boxes[dstBase + i] = src->boxes[srcBase + i];
+    }
+
+    for (uint32_t i = 0; i < N2; i++) {
+		char v = src->empty[srcBoardBase + i];
+        dst->empty[dstBoardBase + i] = v;
+        if (v == GUARD)
+            break;
+    }
+
+    dst->number[dst_id] = src->number[src_id];
+
+	dst->count++;
+}
+
+
+bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_id, uint32_t dst_id, int num, int empty_id) {
+
+    uint16_t mask = 1 << num;
+
+    uint32_t dstBase = dst_id * 9;
+	uint32_t srcBase = src_id * 9;
+
+	char* empty = src.empty + src_id * N2;
+	char firstEmpty = empty[0];
+
+    int row = firstEmpty / N;
+    int col = firstEmpty % N;
+    int box = (row / SQRTN) * SQRTN + (col / SQRTN);
+
+
+    uint16_t* src_rows = src.rows + srcBase;
+    uint16_t* src_cols = src.cols + srcBase;
+    uint16_t* src_boxes = src.boxes + srcBase;
+
+
+    if ((src_rows[row] & mask) || (src_cols[col] & mask) || (src_boxes[box] & mask))
+        return false;
+
+
+
+    uint16_t* dst_rows = dst.rows + dstBase;
+    uint16_t* dst_cols = dst.cols + dstBase;
+    uint16_t* dst_boxes = dst.boxes + dstBase;
+
+    for (int i = 0; i < 9; ++i) {
+        dst_rows[i] = src_rows[i];
+        dst_cols[i] = src_cols[i];
+        dst_boxes[i] = src_boxes[i];
+    }
+
+    dst_rows[row] |= mask;
+    dst_cols[col] |= mask;
+    dst_boxes[box] |= mask;
+
+
+	char* dst_board = dst.boards + dst_id * N2;
+	char* src_board = src.boards + src_id * N2;
+    for (int i = 0; i < N2; ++i)
+        dst_board[i] = src_board[i];
+
+
+    char* dstEmpty = dst.empty + dst_id * N2;
+    for (int i = 0; i < N2; i++) {
+        dstEmpty[i] = empty[i + 1];
+        if (empty[i + 1] == GUARD)
+            break;
+    }
+
+    dst_board[firstEmpty] = '1' + num;
+    dst.number[dst_id] = src.number[src_id];
+
+	return true;
+}
+
+
+
 void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
 {
     SudokuInstance& src = *sr;
     SudokuInstance& dst = *ds;
 
-    // Added: static secondary instance to store copies of every newly created board.
-    static SudokuInstance mirror;
-    static bool mirrorInit = false;
-    if (!mirrorInit) {
-        mirror = create_instance();
-        mirrorInit = true;
-    }
-    // Reset count for fresh population this invocation.
-    mirror.count = 0;
 
     uint32_t out = 0;
 
     for (uint32_t i = 0; i < src.count; i++)
     {
-        const size_t srcEmptyBase = (size_t)i * N2;
-        char firstEmpty = src.empty[srcEmptyBase];
+		char* empty = src.empty + i * N2;
 
-        // If no empties, copy board as-is (already solved or invalid)
-        if (firstEmpty == GUARD || out >= BOARDS - N)
+        if (empty[0] == GUARD || out >= BOARDS - src.count - N)
         {
-            if (out >= BOARDS) {
-                fprintf(stderr, "multiply_boards: capacity exceeded (BOARDS)\n");
-                break;
-            }
-
-            // Copy board chars
-            const size_t srcBoardBase = (size_t)i * N2;
-            const size_t dstBoardBase = (size_t)out * N2;
-            for (int k = 0; k < N2; ++k)
-                dst.boards[dstBoardBase + k] = src.boards[srcBoardBase + k];
-
-            // Copy masks (9 entries each)
-            const int srcBase = (int)i * 9;
-            const int dstBase = (int)out * 9;
-            for (int k = 0; k < 9; ++k) {
-                dst.rows[dstBase + k] = src.rows[srcBase + k];
-                dst.cols[dstBase + k] = src.cols[srcBase + k];
-                dst.boxes[dstBase + k] = src.boxes[srcBase + k];
-            }
-
-            // Empty list is just GUARD
-            dst.empty[out * N2] = GUARD;
-
-            // Preserve identifier
-            dst.number[out] = src.number[i];
-
-            // Mirror copy (new functionality)
-            if (mirror.count < BOARDS) {
-                uint32_t m = mirror.count;
-
-                // Copy board
-                size_t mBoardBase = (size_t)m * N2;
-                for (int k = 0; k < N2; ++k)
-                    mirror.boards[mBoardBase + k] = dst.boards[dstBoardBase + k];
-
-                // Copy masks
-                int mBase = (int)m * 9;
-                for (int k = 0; k < 9; ++k) {
-                    mirror.rows[mBase + k] = dst.rows[dstBase + k];
-                    mirror.cols[mBase + k] = dst.cols[dstBase + k];
-                    mirror.boxes[mBase + k] = dst.boxes[dstBase + k];
-                }
-
-                // Copy empties (only GUARD)
-                mirror.empty[m * N2] = GUARD;
-
-                // Copy number
-                mirror.number[m] = dst.number[out];
-
-                mirror.count++;
-            }
-
+			copyBoard(&src, &dst, i, out);
+            
             ++out;
             continue;
         }
 
-        // Determine row/col/box indices
-        int row = firstEmpty / N;
-        int col = firstEmpty % N;
-        int box = (row / SQRTN) * SQRTN + (col / SQRTN);
-
-        const int srcBase = (int)i * 9;
-
-        // Fetch per-group occupancy bitsets
-        uint16_t rowBits = src.rows[srcBase + row];
-        uint16_t colBits = src.cols[srcBase + col];
-        uint16_t boxBits = src.boxes[srcBase + box];
-
+      
         for (int num = 0; num < 9; ++num)
         {
-            uint16_t mask = (uint16_t)1u << num;
-
-            // Skip digits already present in row/col/box
-            if ((rowBits & mask) || (colBits & mask) || (boxBits & mask))
-                continue;
-
-            if (out >= BOARDS) {
-                fprintf(stderr, "multiply_boards: capacity exceeded while expanding\n");
-                break;
-            }
-
-            const int dstBase = (int)out * 9;
-
-            // 1) Copy base masks
-            for (int k = 0; k < 9; ++k) {
-                dst.rows[dstBase + k] = src.rows[srcBase + k];
-                dst.cols[dstBase + k] = src.cols[srcBase + k];
-                dst.boxes[dstBase + k] = src.boxes[srcBase + k];
-            }
-
-            // 2) Set the new digit bits
-            dst.rows[dstBase + row] |= mask;
-            dst.cols[dstBase + col] |= mask;
-            dst.boxes[dstBase + box] |= mask;
-
-            // 3) Copy the source board and write the chosen digit at firstEmpty
-            const size_t srcBoardBase = (size_t)i * N2;
-            const size_t dstBoardBase = (size_t)out * N2;
-            for (int k = 0; k < N2; ++k)
-                dst.boards[dstBoardBase + k] = src.boards[srcBoardBase + k];
-
-            dst.boards[dstBoardBase + firstEmpty] = (char)('1' + num);
-
-            // 4) Copy empty list excluding the first element (we just filled it)
-            size_t dstEmptyBase = (size_t)out * N2;
-            int e = 0;
-            for (;;)
-            {
-                char srcVal = src.empty[srcEmptyBase + 1 + e];
-                dst.empty[dstEmptyBase + e] = srcVal;
-                if (srcVal == GUARD)
-                    break;
-                ++e;
-            }
-
-            // 5) Preserve board identification
-            dst.number[out] = src.number[i];
-
-            // Mirror copy (new functionality)
-            if (mirror.count < BOARDS) {
-                uint32_t m = mirror.count;
-
-                // Copy board
-                size_t mBoardBase = (size_t)m * N2;
-                for (int k = 0; k < N2; ++k)
-                    mirror.boards[mBoardBase + k] = dst.boards[dstBoardBase + k];
-
-                // Copy masks
-                int mBase = (int)m * 9;
-                for (int k = 0; k < 9; ++k) {
-                    mirror.rows[mBase + k] = dst.rows[dstBase + k];
-                    mirror.cols[mBase + k] = dst.cols[dstBase + k];
-                    mirror.boxes[mBase + k] = dst.boxes[dstBase + k];
-                }
-
-                // Copy empties
-                size_t mEmptyBase = (size_t)m * N2;
-                for (int k = 0; ; ++k) {
-                    char v = dst.empty[dstEmptyBase + k];
-                    mirror.empty[mEmptyBase + k] = v;
-                    if (v == GUARD) break;
-                }
-
-                // Copy number
-                mirror.number[m] = dst.number[out];
-
-                mirror.count++;
-            }
+            
+			if(tryAddNumberToBoard(src, dst, i, out, num, empty[0]) == false)
+				continue;
 
             ++out;
         }
     }
 
     dst.count = out;
-
-    // (Optional) mirror instance now holds copies in 'mirror'; no external exposure per request.
 }
 
 
@@ -591,29 +537,25 @@ SudokuInstance populate_boards(char* boards, int count) {
     generation_a.count = count;
 
 
-    const int MAX_ITER = 10; 
-    int iter = 0;
     SudokuInstance* src = &generation_a;
     SudokuInstance* dst = &generation_b;
-    uint32_t prevCount = src->count;
-    while (iter < MAX_ITER && prevCount > 0) {
+
+    for (int i = 0; i < MAX_ITER; i++) {
         multiply_boards(src, dst);
-        double factor = prevCount ? (double)dst->count / (double)prevCount : 0.0;
-        printf("iter %d: %u -> %u (x%.3f)\n", iter, prevCount, dst->count, factor);
+        double factor = (double)dst->count / (double)src->count;
+        printf("iter %d: %u -> %u (x%.3f)\n", i, src->count, dst->count, factor);
 
 
-        // Prepare next iteration
-        prevCount = dst->count;
         SudokuInstance* tmp = src;
         src = dst;
         dst = tmp;
-        iter++;
 
-        if(factor < 1.5)
-			break;
-        if (src->count >= BOARDS / 0.9)
+        if (factor < 1.5)
+            break;
+        if (dst->count >= BOARDS / 0.9)
             break;
     }
+
 
     freeSudokuInstance(dst);
 
@@ -781,7 +723,7 @@ void print_solutions(SudokuInstance si, Solutions sl, char* boardsm, uint32_t so
     }
 }
 
-void write_solutions_to_file(SudokuInstance si, Solutions sl, const char* outputPath)
+void write_solutions_to_file(SudokuInstance si, Solutions sl, const char* outputPath, uint32_t sol_count)
 {
     if (!outputPath) {
         fprintf(stderr, "Output path is null\n");
@@ -795,7 +737,7 @@ void write_solutions_to_file(SudokuInstance si, Solutions sl, const char* output
     }
 
     // Write solved boards as single 81-char lines with CRLF.
-    for (uint32_t i = 0; i < si.count; ++i) {
+    for (uint32_t i = 0; i < sol_count; ++i) {
         if (sl.flags[i] == 0)
             continue;
 
@@ -821,7 +763,7 @@ int main(int argc, char* argv[])
     argc = 5;
 
     argv[1] = (char*)"gpu";
-    argv[2] = (char*)"1000";
+    argv[2] = (char*)"10";
     argv[3] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
 	argv[4] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\out2";
 
@@ -874,7 +816,7 @@ int main(int argc, char* argv[])
     printf("whole kernel time %.3f ms\n", us / 1000.0);
 
     print_solutions(si, sl, buff, count);
-    write_solutions_to_file(si, sl, outputPath);
+    write_solutions_to_file(si, sl, outputPath, count);
 
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {
