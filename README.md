@@ -42,5 +42,5 @@ make
 ```bash
 sudoku gpu <count> <input_file> <output_file>
 ```
-
+count - number of boards in input file to be solved
 
