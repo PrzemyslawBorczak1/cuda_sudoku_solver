@@ -23,5 +23,24 @@ Empty cells are represented using `0`.
 # Example
 000400560010506090000097300009020040600005000000370000502000000063000000000960800
 
+# Compling
+
+## Cmake
+```bash
+cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release .
+cmake --build . --config Release
+```
+
+
+## make
+```bash
+make 
+```
+
+
 # Usage
-sudoku method count input_file output_file
+sudoku gpu count input_file output_file
+count - number of boards
+
+
+
