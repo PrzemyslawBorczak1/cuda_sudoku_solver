@@ -39,8 +39,8 @@ make
 
 
 # Usage
-sudoku gpu count input_file output_file
-count - number of boards
-
+```bash
+sudoku gpu <count> <input_file> <output_file>
+```
 
 
