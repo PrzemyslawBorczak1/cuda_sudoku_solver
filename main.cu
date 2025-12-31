@@ -17,20 +17,22 @@
 #define N2 81
 #define SQRTN 3
 
+#define LINE_LEN 83
 
 #define THREADSPERBLOCK 1
 
-#define LINE_LEN 83
+// max amount of boards after multiplication
+#define BOARDS 400000 //400 tys
+// max aount of multiplication iterations
+#define MAX_ITER 7
 
-
-
-#define BOARDS 100000 //100 tys
-#define MAX_ITER 5
-
-
+// fkags for solution status
+#define FLAG_SOLVED 1
+#define FLAG_MULTIPLE 2
+#define FLAG_UNSOLVED 0
 
 using namespace std;
-
+// struct with copied arrays used by kernel and also by host to pupulate data
 struct SudokuInstance {
     char* empty;
 
@@ -45,12 +47,20 @@ struct SudokuInstance {
     uint32_t count;
 };
 
+// struct with solution created by kernel
 struct Solutions {
     int* flags;
     char* lines;
 };
 
 
+
+
+
+
+
+
+// kernel methods
 __device__ void DFS(uint16_t* rows,
     uint16_t* cols,
     uint16_t* boxes,
@@ -62,6 +72,7 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     if (id >= si.count) 
         return;
 
+	// moving pointers to proper positions
     char* empty = si.empty + id * N2;
 	char stack[N2];
 
@@ -75,15 +86,17 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     if (stack[0] == NO_SOL)
         return;
 
-
+	// geting inital number of solved board
     uint32_t nb = si.number[id];
 
-    int prev = atomicExch(sl.flags + nb, 1);
-    if (prev != 0) {
-        atomicExch(sl.flags + nb, 2);
+	// setting flag for solved board
+    int prev = atomicExch(sl.flags + nb, FLAG_SOLVED);
+    if (prev != FLAG_UNSOLVED) {
+        atomicExch(sl.flags + nb, FLAG_MULTIPLE);
         return;
     }
 
+	// writing solution to output lines
     char i = 0;
 	char* brd = si.boards + id * N2;
     while(empty[i] != GUARD) {
@@ -101,27 +114,33 @@ __global__ void sudokuKernel(SudokuInstance si, Solutions sl)
     line[82] = '\n';
 }
 
+// DFS implementation
 __device__ void DFS(uint16_t* rows,
     uint16_t* cols,
     uint16_t* boxes,
     char* empty, char* stack)
 {
+	// stack holds last tried number for each depth
     char depth = 0;
     stack[0] = -1;
+	// cheks if solution was found initaly true
     bool found = true;
     while (true) {
+		// no solution found
         if (depth < 0) {
             stack[0] = NO_SOL;
             return;
         }
+		// ind of next empty cell
         char ind = empty[depth];
         if (ind == GUARD) {
             return;
         }
+		// calculating in wchich row, col, box is this empty cell
         char row = ind / 9;
         char col = ind % 9;
         char box = (char)((row / 3) * 3 + (col / 3));
-
+		// backtracking - removing last tried number from masks (but leaving number on stack for next checking)
         if (!found) {
             uint16_t mask = (uint16_t)1 << (stack[depth]);
             rows[row] &= ~mask;
@@ -130,8 +149,10 @@ __device__ void DFS(uint16_t* rows,
         }
 
         found = false;
+		// checking next numbers
         for (char num = (char)(stack[depth] + 1); num < 9; num++) {
             uint16_t mask = (uint16_t)1 << (num);
+			// number cannot be placed here
             if ((rows[row] & mask) ||
                 (cols[col] & mask) ||
                 (boxes[box] & mask))
@@ -156,11 +177,15 @@ __device__ void DFS(uint16_t* rows,
 
 
 
+
+
+
+
 cudaError_t prepareDeviceSudokuInstance(SudokuInstance *d_si, SudokuInstance h_si) {
     cudaError_t cuda_status = cudaSuccess;
 	uint32_t count = h_si.count;
 
-    // alocate
+    // alocate memory
     size_t mask_count = count * N * sizeof(uint16_t);
     if ((cuda_status = cudaMalloc((void**)&d_si->rows, mask_count)) != cudaSuccess) return cuda_status;
     if ((cuda_status = cudaMalloc((void**)&d_si->cols, mask_count)) != cudaSuccess) return cuda_status;
@@ -174,8 +199,7 @@ cudaError_t prepareDeviceSudokuInstance(SudokuInstance *d_si, SudokuInstance h_s
     if ((cuda_status = cudaMalloc((void**)&d_si->number, number_count)) != cudaSuccess) return cuda_status;
 
 
-    // copy
-
+	// copy data from host to device
     if ((cuda_status = cudaMemcpy(d_si->rows, h_si.rows, mask_count, cudaMemcpyHostToDevice)) != cudaSuccess) return cuda_status;
     if ((cuda_status = cudaMemcpy(d_si->cols, h_si.cols, mask_count, cudaMemcpyHostToDevice)) != cudaSuccess)  return cuda_status;
     if ((cuda_status = cudaMemcpy(d_si->boxes, h_si.boxes, mask_count, cudaMemcpyHostToDevice)) != cudaSuccess)  return cuda_status;
@@ -191,6 +215,7 @@ cudaError_t prepareDeviceSudokuInstance(SudokuInstance *d_si, SudokuInstance h_s
 	return cuda_status;
 }
 
+// helper mainly used to not perform free on uninitialized pointers
 SudokuInstance createEmptySudokuInstance() {
 	SudokuInstance instance;
 
@@ -204,10 +229,11 @@ SudokuInstance createEmptySudokuInstance() {
     return instance;
 }
 
+// allocate memory for solutions on device
 cudaError_t prepareDeviceSolutions(Solutions* d_ret, uint32_t sol_count) {
 
     cudaError_t cuda_status = cudaSuccess;
-
+   
 	size_t flag_count = sol_count * sizeof(int);
 	size_t line_count = sol_count * LINE_LEN * sizeof(char);
 
@@ -218,6 +244,7 @@ cudaError_t prepareDeviceSolutions(Solutions* d_ret, uint32_t sol_count) {
     return cuda_status;
 }
 
+// same as with SudokuInstance
 Solutions createEmptySolutions() {
     Solutions sl{};
     sl.flags = nullptr;
@@ -225,6 +252,7 @@ Solutions createEmptySolutions() {
     return sl;
 }
 
+// copyies solutions from device to host
 cudaError_t copySolutions(Solutions d_ret, Solutions* h_ret, uint32_t sol_count) {
 
     cudaError_t cuda_status = cudaSuccess;
@@ -240,56 +268,81 @@ cudaError_t copySolutions(Solutions d_ret, Solutions* h_ret, uint32_t sol_count)
 }
 
 cudaError_t prepareAndRunKernel(SudokuInstance h_si, SudokuInstance d_si, Solutions* h_ret, Solutions *d_ret, uint32_t sol_count) {
+
+    // prepare
     cudaError_t cuda_status = cudaSetDevice(0);
     if (cuda_status != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed! Do you have a CUDA-capable GPU installed?");
+        printf("cudaSetDevice failed! Do you have a CUDA-capable GPU installed?");
         return cuda_status;
     }
+
+    printf("====Preparing data for kernel====\n");
+    auto t0 = chrono::high_resolution_clock::now();
 
     if ((cuda_status = prepareDeviceSudokuInstance(&d_si, h_si)) != cudaSuccess) return cuda_status;
     if ((cuda_status = prepareDeviceSolutions(d_ret, sol_count)) != cudaSuccess) return cuda_status;
 
-    // launch
+
+    auto t1 = chrono::high_resolution_clock::now();
+    auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+    printf("time %.3f ms\n", us / 1000.0);
+
+
+
     const int block = (int)(d_si.count / THREADSPERBLOCK + 1);
-    auto t0 = chrono::high_resolution_clock::now();
+
+    // run
+	printf("====Launching kernel with %d blocks of %d threads====\n", block, THREADSPERBLOCK);
+     t0 = chrono::high_resolution_clock::now();
     sudokuKernel << <block, THREADSPERBLOCK >> > (d_si, *d_ret);
 
 
     cuda_status = cudaDeviceSynchronize();
     if (cuda_status != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching sudokuKernel!\n", cuda_status);
+        printf("cudaDeviceSynchronize returned error code %d after launching sudokuKernel!\n", cuda_status);
         return cuda_status;
     }
 
-    auto t1 = chrono::high_resolution_clock::now();
-    auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-    printf("kernell call %.3f ms\n", us / 1000.0);
+     t1 = chrono::high_resolution_clock::now();
+     us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+    printf("time %.3f ms\n", us / 1000.0);
+
+
+
 
     cuda_status = cudaGetLastError();
     if (cuda_status != cudaSuccess) {
-        fprintf(stderr, "sudokuKernel launch failed: %s\n", cudaGetErrorString(cuda_status));
+        printf("sudokuKernel launch failed: %s\n", cudaGetErrorString(cuda_status));
         return cuda_status;
     }
 
 
-
+	// copy solutions back to host
+    printf("====Copying solutions from device====\n");
+    t0 = chrono::high_resolution_clock::now();
 	if((cuda_status = copySolutions(*d_ret, h_ret, sol_count)) != cudaSuccess)
 		return cuda_status;
+
+
+    t1 = chrono::high_resolution_clock::now();
+    us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+    printf("time %.3f ms\n", us / 1000.0);
 
 	return cudaSuccess;
 }
 
-
 void freeSudokuInstance(SudokuInstance* si);
+// main function to be called from host
+// prepers data, runs kernel, retrieves results and frees memory
 cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret, uint32_t sol_count)
 {
     cudaError_t cuda_status = cudaSuccess;
 
-    const size_t flag_count  = (size_t)sol_count * sizeof(int);
-    const size_t line_count  = (size_t)sol_count * LINE_LEN * sizeof(char);
+    const size_t flag_count = (size_t)sol_count * sizeof(int);
+    const size_t line_count = (size_t)sol_count * LINE_LEN * sizeof(char);
 
-    ret->flags   = (int*)malloc(flag_count);
-    ret->lines   = (char*)malloc(line_count);
+    ret->flags = (int*)malloc(flag_count);
+    ret->lines = (char*)malloc(line_count);
 
 	SudokuInstance d_si = createEmptySudokuInstance();
     Solutions d_ret = createEmptySolutions();
@@ -317,12 +370,23 @@ cudaError_t SudokuCuda(SudokuInstance si, char* board, Solutions* ret, uint32_t 
 
 
 
+
+
+
+
+
+
+
+
+
+
+// struct used for sorting empty cells
 typedef struct Node {
     Node* next;
     char val;
 } Node;
 
-void add_node(Node** head, char value) {
+void addNode(Node** head, char value) {
     Node* new_node = (Node*)malloc(sizeof(Node));
     new_node->val = value;
 
@@ -335,7 +399,6 @@ void add_node(Node** head, char value) {
     new_node->next = *head;
     *head = new_node;
 }
-
 char max(char a, char b) {
     return (a > b) ? a : b;
 }
@@ -343,7 +406,23 @@ char max(char a, char b, char c) {
     return max(max(a, b), c);
 }
 
-void write_to_tab(Node* head, char* tab, char* top) {
+// moving all data right and last element to first position in array
+void cycle(char arr[81], int end) {
+    char tmp = arr[end - 1];
+    for (int i = end - 1; i > 0; i--) {
+        arr[i] = arr[i - 1];
+    }
+    arr[0] = tmp;
+}
+//cycles amount times
+void cycle(char arr[81], int end, int amount) {
+    for (int i = 0; i < amount; i++) {
+        cycle(arr, end);
+    }
+}
+
+// writing linked list to array
+void writeToTab(Node* head, char* tab, char* top) {
     if (tab == nullptr || top == nullptr) {
         return;
     }
@@ -357,8 +436,9 @@ void write_to_tab(Node* head, char* tab, char* top) {
     }
 }
 
-
-SudokuInstance create_instance() {
+// creating host SudokuInstance with allocated memory
+// this instance will be later populated with data
+SudokuInstance createAllocatedInstance() {
 
     SudokuInstance instance{};
     instance.empty = (char*)malloc(BOARDS * N2);
@@ -374,16 +454,17 @@ SudokuInstance create_instance() {
     return instance;
 }
 
+// freeing host SudokuInstance
 void freeSudokuInstance(SudokuInstance* si) {
     free(si->empty);
     free(si->rows);
     free(si->cols);
     free(si->boxes);
     free(si->number);
-
 }
 
-bool test_set(uint16_t* part, int index, uint16_t mask) {
+// try setting bit in mask, returns false if bit was already set
+bool testSet(uint16_t* part, int index, uint16_t mask) {
 
     if (part[index] & mask) {
         return false;
@@ -394,18 +475,22 @@ bool test_set(uint16_t* part, int index, uint16_t mask) {
 }
 
 
-
-
-int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
+// first write to sudoku insatnce before multiplication
+// creates masks and empty cell list in order of most constrained first
+int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board, uint32_t sol_nb) {
+	// counter for amount of numbers in rows, cols, boxes
 	char counters[27] = { 0 };
+	// buff to hold indices of empty cells later copied to sudoku instance
 	char buff[81];
+	// aray of linked lists for sorting empty cells
     Node* nodes[9] = { 0 };
 
 
     char empty_ptr = 0;
 
+	// clearing masks
     const int base = board_nb * 9;
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < 9; i++) {
         si.rows[base + i] = 0;
         si.cols[base + i] = 0;
         si.boxes[base + i] = 0;
@@ -414,6 +499,7 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
     for (int i = 0; i < N2; ++i) {
         si.boards[board_nb * N2 + i] = board[i];
         char ch = board[i];
+		// finding empty cells
         if (ch == '0') {
             buff[empty_ptr++] = i;
             continue;
@@ -425,22 +511,23 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
         int row = i / 9;
         int col = i % 9;
         int box = (row / 3) * 3 + (col / 3);
-
-        if (!test_set(si.rows + base, row, mask))
+		// seting masks if board is invalid returns 1
+        if (!testSet(si.rows + base, row, mask))
             return 1;
 		counters[row]++;
 
 
-        if (!test_set(si.cols + base, col, mask))
+        if (!testSet(si.cols + base, col, mask))
             return 1;
         counters[9 + col]++;
 
-        if (!test_set(si.boxes + base, box, mask))
+        if (!testSet(si.boxes + base, box, mask))
             return 1;
 		counters[18 + box]++;
     }
 	buff[empty_ptr] = GUARD;
 
+    // bucket sort
     for (int i = 0; i < empty_ptr; i++) {
 
         int row = buff[i] / 9;
@@ -449,26 +536,24 @@ int wrtieBoardToInstance(SudokuInstance si, int board_nb, char* board) {
 
 		char m = max(counters[row], counters[9 + col], counters[18 + box]);
 
-		add_node(&nodes[m], buff[i]);
-
+		addNode(&nodes[m], buff[i]);
     }
 
 	empty_ptr = 0;
     for(int i = 8; i >= 0 ; i--) {
-        write_to_tab(nodes[i], si.empty + board_nb * N2, &empty_ptr);
+        writeToTab(nodes[i], si.empty + board_nb * N2, &empty_ptr);
 	}
 
     si.empty[board_nb * N2 + empty_ptr ] = GUARD;
+    if (sol_nb <= 20) {
+        cycle(si.empty + board_nb * N2, empty_ptr, 4);
+    }
 
 
     return 0;
 }
 
-
-
-
-
-
+// rewrites board from src instance to dst instance without changing it
 void copyBoard(SudokuInstance* src, SudokuInstance* dst, uint32_t src_id, uint32_t dst_id) {
     const size_t srcBoardBase = src_id * N2;
     const size_t dstBoardBase = dst_id * N2;
@@ -497,15 +582,18 @@ void copyBoard(SudokuInstance* src, SudokuInstance* dst, uint32_t src_id, uint32
 	dst->count++;
 }
 
-bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_id, uint32_t dst_id, int num, int empty_id) {
-
+// tries to add number to board if board would be illegal does nothing. 
+// in oder cases creates new board in dst instance
+bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_id, uint32_t dst_id, int num) {
+	// setts bit mask for number to add and pointers to proper positions in arrays
+    
     uint16_t mask = 1 << num;
 
     uint32_t dstBase = dst_id * 9;
 	uint32_t srcBase = src_id * 9;
 
 	char* empty = src.empty + src_id * N2;
-	char firstEmpty = empty[empty_id];
+	char firstEmpty = empty[0];
 
     int row = firstEmpty / N;
     int col = firstEmpty % N;
@@ -516,12 +604,12 @@ bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_
     uint16_t* src_cols = src.cols + srcBase;
     uint16_t* src_boxes = src.boxes + srcBase;
 
-
+	// checks if number can be placed
     if ((src_rows[row] & mask) || (src_cols[col] & mask) || (src_boxes[box] & mask))
         return false;
 
 
-
+	// placing number and copying masks
     uint16_t* dst_rows = dst.rows + dstBase;
     uint16_t* dst_cols = dst.cols + dstBase;
     uint16_t* dst_boxes = dst.boxes + dstBase;
@@ -556,7 +644,8 @@ bool tryAddNumberToBoard(SudokuInstance& src, SudokuInstance& dst, uint32_t src_
 	return true;
 }
 
-void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
+// multiplies boards in src instance and creates new boards in dst instance
+void multiplyBoards(SudokuInstance* sr, SudokuInstance* ds)
 {
     SudokuInstance& src = *sr;
     SudokuInstance& dst = *ds;
@@ -567,7 +656,7 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
     for (uint32_t i = 0; i < src.count; i++)
     {
 		char* empty = src.empty + i * N2;
-
+		// if board is already solved or amount of max boards was reached copy  data without changing
         if (empty[0] == GUARD || out >= BOARDS - src.count - N)
         {
 			copyBoard(&src, &dst, i, out);
@@ -576,11 +665,10 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
             continue;
         }
 
-      
+		// for each board try adding each number to first empty cell
         for (int num = 0; num < 9; ++num)
         {
-            
-			if(tryAddNumberToBoard(src, dst, i, out, num, 0) == false)
+			if(tryAddNumberToBoard(src, dst, i, out, num) == false)
 				continue;
 
             ++out;
@@ -590,12 +678,13 @@ void multiply_boards(SudokuInstance* sr, SudokuInstance* ds)
     dst.count = out;
 }
 
-SudokuInstance populate_boards(char* boards, int count) {
-    SudokuInstance generation_a = create_instance();
-    SudokuInstance generation_b = create_instance();
+// main entry for multiplying boards
+SudokuInstance populateBoards(char* boards, int count) {
+    SudokuInstance generation_a = createAllocatedInstance();
+    SudokuInstance generation_b = createAllocatedInstance();
 
     for (int i = 0; i < count; i++) {
-        if (wrtieBoardToInstance(generation_a, i, boards + i * LINE_LEN) != 0) {
+        if (wrtieBoardToInstance(generation_a, i, boards + i * LINE_LEN, count) != 0) {
             printf("Invalid board at line %d\n", i + 1);
             exit(EXIT_FAILURE);
         }
@@ -609,7 +698,7 @@ SudokuInstance populate_boards(char* boards, int count) {
     SudokuInstance* dst = &generation_b;
 
     for (int i = 0; i < MAX_ITER; i++) {
-        multiply_boards(src, dst);
+        multiplyBoards(src, dst);
         double factor = (double)dst->count / (double)src->count;
         printf("iter %d: %u -> %u (x%.3f)\n", i, src->count, dst->count, factor);
 
@@ -627,9 +716,14 @@ SudokuInstance populate_boards(char* boards, int count) {
 
     freeSudokuInstance(dst);
 
+
+    printf("====Created %u Boards=====\n", src->count);
     return *src;
 
 }
+
+
+
 
 
 
@@ -647,12 +741,13 @@ void usage() {
     printf("  output_file  : path to output text file (will be created/overwritten)\n");
 }
 
-char* read_to_buff(int count, char* path) {
+// reading input file to buffer
+char* readToBuff(int count, char* path) {
 
 
     FILE* source = fopen(path, "rb");
     if (source == NULL) {
-        fprintf(stderr, "Could not open input file: '%s'\n", path);
+        printf("Could not open input file: '%s'\n", path);
         usage();
         exit(EXIT_FAILURE);
     }
@@ -661,7 +756,7 @@ char* read_to_buff(int count, char* path) {
 
     char* buff = (char*)malloc(expected);
     if (!buff) {
-        fprintf(stderr, "malloc bulk buffer");
+        printf("malloc bulk buffer");
 
         exit(EXIT_FAILURE);
     }
@@ -669,7 +764,7 @@ char* read_to_buff(int count, char* path) {
     size_t got = fread(buff, 1, expected, source);
     if (got != expected) {
         if (feof(source))
-            fprintf(stderr, "Too short file got %d lines but needs %d lines\n", (int)(got / LINE_LEN), (int)(expected / LINE_LEN));
+            printf("Too short file got %d lines but needs %d lines\n", (int)(got / LINE_LEN), (int)(expected / LINE_LEN));
         usage();
         exit(EXIT_FAILURE);
     }
@@ -679,16 +774,17 @@ char* read_to_buff(int count, char* path) {
     return buff;
 }
 
+// writing solutions to output file
 void write_solutions_to_file(Solutions sl, const char* outputPath, uint32_t sol_count)
 {
     if (!outputPath) {
-        fprintf(stderr, "Output path is null\n");
+        printf("Output path is null\n");
         return;
     }
 
     FILE* out = fopen(outputPath, "wb");
     if (!out) {
-        fprintf(stderr, "Could not open output file: '%s'\n", outputPath);
+        printf("Could not open output file: '%s'\n", outputPath);
         return;
     }
 
@@ -700,13 +796,13 @@ void write_solutions_to_file(Solutions sl, const char* outputPath, uint32_t sol_
         const char* line = sl.lines + (size_t)i * LINE_LEN;
         // write 81 chars
         if (fwrite(line, 1, 81, out) != 81) {
-            fprintf(stderr, "Failed to write board %u\n", i);
+            printf("Failed to write board %u\n", i);
             break;
         }
         // write CRLF
         static const char crlf[2] = { '\r', '\n' };
         if (fwrite(crlf, 1, 2, out) != 2) {
-            fprintf(stderr, "Failed to write CRLF for board %u\n", i);
+            printf("Failed to write CRLF for board %u\n", i);
             break;
         }
     }
@@ -714,185 +810,102 @@ void write_solutions_to_file(Solutions sl, const char* outputPath, uint32_t sol_
     fclose(out);
 }
 
-
-
-
-
-// todo debuugiing
-void print_uint16_bits(uint16_t value)
+// checking if all boards were solved
+void evalSolution(Solutions sl, uint32_t sol_count) 
 {
-    char buf[16 + 4 + 2]; // bits + spaces + newline + '\0'
-    int pos = 0;
-    for (int i = 0; i < 16; ++i)
-    {
-        buf[pos++] = (char)(((value >> i) & 1u) ? '1' : '0');
-
-        // Space after each 4-bit chunk
-        if (i % 4 == 3)
-            buf[pos++] = ' ';
-    }
-    buf[pos++] = '\n';
-    buf[pos] = '\0';
-    printf("%s", buf);
-}
-
-void print_board_pretty(const char* board81, int id)
-{
-    printf("Board %d:\n", id);
-    printf("+-------+-------+-------+\n");
-    for (int r = 0; r < 9; ++r)
-    {
-        printf("| ");
-        for (int c = 0; c < 9; ++c)
-        {
-            char ch = board81[r * 9 + c];
-            if (ch == '0') ch = '.';
-            printf("%c ", ch);
-            if (c % 3 == 2) printf("| ");
-        }
-        printf("\n");
-        if (r % 3 == 2)
-            printf("+-------+-------+-------+\n");
-    }
-}
-
-void print_generated(SudokuInstance si)
-{
-    if (!si.boards) {
-        printf("No boards buffer (si.boards == nullptr)\n");
-        return;
-    }
-    if (si.count == 0) {
-        printf("No boards generated (si.count == 0)\n");
-        return;
-    }
-
-    for (uint32_t idx = 0; idx < si.count; ++idx) {
-        const char* board81 = si.boards + (size_t)idx * N2;
-
-        // Pretty header
-        printf("Generated board %u:\n", idx);
-        printf("+-------+-------+-------+\n");
-        for (int r = 0; r < 9; ++r) {
-            printf("| ");
-            for (int c = 0; c < 9; ++c)
-            {
-                char ch = board81[r * 9 + c];
-                if (ch == '0') ch = '.';
-                printf("%c ", ch);
-                if (c % 3 == 2) printf("| ");
-            }
-            printf("\n");
-            if (r % 3 == 2)
-                printf("+-------+-------+-------+\n");
-        }
-    }
-}
-
-void print_bulk_buffer(const char* bulk, int count)
-{
-    if (!bulk) {
-        printf("Buffer is null\n");
-        return;
-    }
-    if (count <= 0) {
-        printf("Nothing to print (count <= 0)\n");
-        return;
-    }
-
-    for (int i = 0; i < count; ++i) {
-        const char* line = bulk + (size_t)i * LINE_LEN;
-        printf("Line %d: ", i);
-
-        print_board_pretty(line, i);
-        printf("\n");
-    }
-}
-
-void print_solutions(SudokuInstance si, Solutions sl, char* boardsm, uint32_t sol_count) 
-{
+	uint32_t solved = 0;
     for (uint32_t i = 0; i < sol_count; ++i) {
         int flag = sl.flags[i];
-        if (flag != 1) {
-			printf("(flag=%d):\n", flag);
-            continue;
+        switch (flag) {
+            case FLAG_SOLVED:
+                solved++;
+				break;
+            case FLAG_MULTIPLE:
+				printf("Board %u has multiple solutions\n", i);
+                break;
+			case FLAG_UNSOLVED:
+                printf("Board %u could not be solved\n", i);
+				break;
         }
-
-        const char* line = sl.lines + (size_t)i * LINE_LEN;
-        continue;
-        printf("%u: ", i);
-        for (int k = 0; k < 81; ++k)
-            printf("%c", line[k]);
-        putchar('\n');
     }
-}
 
+	printf("Solved boards: %u / %u\n", solved, sol_count);
+}
 
 int main(int argc, char* argv[])
 {
-   argc = 5;
-
-    argv[1] = (char*)"gpu";
-    argv[2] = (char*)"100";
-    argv[3] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\sudoku_data.csv";
-	argv[4] = (char*)"C:\\Users\\przem\\Pulpit\\cuda\\P1\\additional\\sudoku_data\\out2";
-
+   
+    // checking arguments
     if (argc != 5) {
-        fprintf(stderr, "Invalid arguments. Expected exactly 4 parameters.\n");    
+        printf("Invalid arguments. Expected exactly 4 parameters.\n");
         usage();
         return 1;
     }
+  
+	printf("Input:\n    method : %s, count : %d, \n    input_file : '%s', \n    output_file : '%s'", argv[1], stoi(argv[2]), argv[3], argv[4]);
+
+	printf("\n\n====Sudoku Solver CUDA====\n\n");
 
     const char* method = argv[1];
     const char* countStr = argv[2];
     const char* outputPath = argv[4];
 
     if (strcmp(method, "cpu") != 0 && strcmp(method, "gpu") != 0) {
-        fprintf(stderr, "Invalid method: '%s'. Allowed: 'cpu' or 'gpu'.\n", method);
+        printf("Invalid method: '%s'. Allowed: 'cpu' or 'gpu'.\n", method);
         usage();
         exit(EXIT_FAILURE);
+    }
+
+    if (strcmp(method, "cpu") == 0){
+        return 0;
     }
 
     int count = stoi(countStr);
     if (count < 0) {
-        fprintf(stderr, "Invalid count: '%d'. Must be a positive integer.\n", count);
+        printf("Invalid count: '%d'. Must be a positive integer.\n", count);
         usage();
         exit(EXIT_FAILURE);
     }
 
+	// main app functionality
+    auto t_all_1 = chrono::high_resolution_clock::now();
 
+	printf("====Cpu reading and multiplying====\n");
     auto t0 = chrono::high_resolution_clock::now();
-    char* buff = read_to_buff(count, argv[3]);
-    SudokuInstance si = populate_boards(buff, count);
+    char* buff = readToBuff(count, argv[3]);
+    SudokuInstance si = populateBoards(buff, count);
 
     auto t1 = chrono::high_resolution_clock::now();
     auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
     printf("time %.3f ms\n", us / 1000.0);
 
+
 	Solutions sl = {};
-
-
-    t0 = chrono::high_resolution_clock::now();
-
     cudaError_t cudaStatus = SudokuCuda(si, buff,&sl, count);
     if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "SudokuCuda failed!");
+        printf("SudokuCuda failed!");
         return 1;
     }
 
+	// evaluating solutions
+    printf("====Cpu evaluating solution====\n");
+    evalSolution(sl, count);
 
-    t1 = chrono::high_resolution_clock::now();
-    us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-    printf("whole kernel time %.3f ms\n", us / 1000.0);
 
-    print_solutions(si, sl, buff, count);
+    printf("====Saving to file====\n");
     write_solutions_to_file(sl, outputPath, count);
 
     cudaStatus = cudaDeviceReset();
     if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceReset failed!");
+        printf("cudaDeviceReset failed!");
         return 1;
     }
+
+
+    auto t_all_2 = chrono::high_resolution_clock::now();
+    us = chrono::duration_cast<chrono::microseconds>(t_all_2 - t_all_1).count();
+	printf("====Total time====\n");
+    printf("%.3f ms\n", us / 1000.0);
 
     return 0;
 }
